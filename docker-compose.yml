@@ -1,0 +1,151 @@
+version: "3.9"
+
+services:
+  # PostgreSQL Database
+  postgre-sql-inmobiscrap:
+    image: postgres:15-alpine
+    container_name: postgre-sql-inmobiscrap
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: inmobiscrap_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inmobiscrap_network
+
+  # Ollama LLM Service
+  ollama-inmobiscrap:
+    image: ollama/ollama:latest
+    container_name: ollama-inmobiscrap
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_KEEP_ALIVE=24h
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:11434/api/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - inmobiscrap_network
+
+  # Redis for Celery
+  redis-inmobiscrap:
+    image: redis:7-alpine
+    container_name: redis-inmobiscrap
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - inmobiscrap_network
+
+  # Django Backend
+  backend-django-inmobiscrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend-django-inmobiscrap
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      DATABASE_URL: postgresql://postgres:postgres123@postgre-sql-inmobiscrap:5432/inmobiscrap_db
+      DB_NAME: inmobiscrap_db
+      DB_USER: postgres
+      DB_PASSWORD: postgres123
+      DB_HOST: postgre-sql-inmobiscrap
+      DB_PORT: 5432
+
+      # Django
+      DJANGO_SECRET_KEY: "dev-secret-key-change-in-production"
+      DJANGO_DEBUG: "True"
+      DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,backend-django-inmobiscrap"
+
+      # Ollama
+      OLLAMA_BASE_URL: http://ollama-inmobiscrap:11434
+      OLLAMA_MODEL: ollama/llama3.2
+      EMBEDDINGS_MODEL: ollama/nomic-embed-text
+
+      # Redis/Celery
+      REDIS_URL: redis://redis-inmobiscrap:6379/0
+      CELERY_BROKER_URL: redis://redis-inmobiscrap:6379/0
+      CELERY_RESULT_BACKEND: redis://redis-inmobiscrap:6379/0
+
+      # Scraping Configuration
+      SCRAPEGRAPH_RATE_LIMIT: 15
+      SCRAPEGRAPH_MAX_REQUESTS_PER_HOUR: 20
+      SCRAPEGRAPH_RESPECT_ROBOTS_TXT: "True"
+
+      # LibreOffice
+      LIBREOFFICE_PATH: /usr/bin/libreoffice
+
+      # Logging
+      LOG_LEVEL: INFO
+
+    volumes:
+      - .:/app
+      - media_files:/app/media
+      - static_files:/app/static
+      - scraping_logs:/app/logs
+      - reports_output:/app/reports
+    depends_on:
+      postgre-sql-inmobiscrap:
+        condition: service_healthy
+      ollama-inmobiscrap:
+        condition: service_healthy
+      redis-inmobiscrap:
+        condition: service_healthy
+    networks:
+      - inmobiscrap_network
+    tty: true
+    stdin_open: true
+
+# Volúmenes persistentes
+volumes:
+  postgres_data:
+    driver: local
+  ollama_models:
+    driver: local
+  redis_data:
+    driver: local
+  media_files:
+    driver: local
+  static_files:
+    driver: local
+  scraping_logs:
+    driver: local
+  reports_output:
+    driver: local
+
+# Red personalizada
+networks:
+  inmobiscrap_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
