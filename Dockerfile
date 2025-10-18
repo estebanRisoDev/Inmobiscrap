@@ -66,4 +66,4 @@ USER django
 
 # 10) Exponer puerto y comando simple
 EXPOSE 8000
-CMD ["python3.11", "manage.py", "runserver", "0.0.0.0:8000"]
+CMD ["python3.11", "inmobiscrap/manage.py", "runserver", "0.0.0.0:8000"]
