@@ -1,24 +1,26 @@
-# Crear archivo: inmobiscrap/scraping/api/auth_views.py
+# inmobiscrap/scraping/api/auth_views.py
 
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from django.contrib.auth import authenticate, login, logout
-from django.views.decorators.csrf import csrf_exempt
 from django.middleware.csrf import get_token
+from django.views.decorators.csrf import ensure_csrf_cookie
 from rest_framework.authtoken.models import Token
 from django.contrib.auth.models import User
 
+
 @api_view(['GET'])
 @permission_classes([AllowAny])
+@ensure_csrf_cookie
 def get_csrf_token(request):
     """Obtener token CSRF"""
     return Response({'csrfToken': get_token(request)})
 
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
-@csrf_exempt
 def login_view(request):
     """Vista de login"""
     username = request.data.get('username')
@@ -37,8 +39,9 @@ def login_view(request):
         # Login con sesión de Django
         login(request, user)
         
-        # Crear o obtener token (opcional)
-        token, created = Token.objects.get_or_create(user=user)
+        # IMPORTANTE: Borrar token anterior si existe y crear uno nuevo
+        Token.objects.filter(user=user).delete()
+        token = Token.objects.create(user=user)
         
         return Response({
             'success': True,
@@ -54,21 +57,49 @@ def login_view(request):
             status=status.HTTP_401_UNAUTHORIZED
         )
 
+
 @api_view(['POST'])
+@permission_classes([IsAuthenticated])  # Cambiar a IsAuthenticated
 def logout_view(request):
-    """Vista de logout"""
-    logout(request)
-    return Response({'success': True})
+    """Vista de logout - Limpieza completa"""
+    try:
+        # Borrar token del usuario autenticado
+        if hasattr(request.user, 'auth_token'):
+            request.user.auth_token.delete()
+        
+        # Logout de la sesión de Django
+        logout(request)
+        
+        return Response({
+            'success': True,
+            'message': 'Logout exitoso'
+        })
+    except Exception as e:
+        # Si falla, igual hacer logout
+        logout(request)
+        return Response({
+            'success': True,
+            'message': 'Logout completado'
+        })
+
 
 @api_view(['GET'])
 @permission_classes([AllowAny])
 def check_auth(request):
     """Verificar si el usuario está autenticado"""
     if request.user.is_authenticated:
+        # Verificar si tiene token
+        try:
+            token = Token.objects.get(user=request.user)
+            has_token = True
+        except Token.DoesNotExist:
+            has_token = False
+            
         return Response({
             'authenticated': True,
             'username': request.user.username,
-            'is_staff': request.user.is_staff
+            'is_staff': request.user.is_staff,
+            'has_token': has_token
         })
     else:
         return Response({
