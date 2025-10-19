@@ -113,6 +113,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # REST Framework
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication', 
         'rest_framework_simplejwt.authentication.JWTAuthentication',
         'rest_framework.authentication.SessionAuthentication',
     ],
@@ -146,9 +147,19 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:8080",  # Si usas nginx
 ]
 
-# IMPORTANTE: Agregar estas líneas para permitir credenciales
+# CORS Settings - CONFIGURACIÓN CORREGIDA
+CORS_ALLOW_ALL_ORIGINS = False  # ❌ Cambiado a False para mayor control
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8080",
+]
+
+# Permitir credenciales (cookies, auth headers)
 CORS_ALLOW_CREDENTIALS = True
 
+# Headers permitidos
 CORS_ALLOW_HEADERS = [
     'accept',
     'accept-encoding',
@@ -161,6 +172,7 @@ CORS_ALLOW_HEADERS = [
     'x-requested-with',
 ]
 
+# Métodos HTTP permitidos
 CORS_ALLOW_METHODS = [
     'DELETE',
     'GET',
@@ -168,6 +180,21 @@ CORS_ALLOW_METHODS = [
     'PATCH',
     'POST',
     'PUT',
+]
+
+# CRÍTICO: Configuración de Cookies
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_SAMESITE = 'Lax'
+SESSION_COOKIE_SECURE = False  # False en desarrollo, True en producción
+CSRF_COOKIE_SECURE = False     # False en desarrollo, True en producción
+SESSION_COOKIE_HTTPONLY = True
+CSRF_COOKIE_HTTPONLY = False   # Debe ser False para que JS pueda leerlo
+
+# Dominios de confianza para CSRF
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:8080",
 ]
 
 # Configuración de Cookies para CORS
