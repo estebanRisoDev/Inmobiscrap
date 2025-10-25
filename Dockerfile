@@ -42,11 +42,13 @@ RUN groupadd -r django && useradd -r -g django -d /app django
 WORKDIR /app
 
 # 5) Copiar requirements primero (para cacheo de capas)
-COPY requirements.txt /app/
+COPY requirements.txt constraints.txt /app/
 
-# 6) Pip + dependencias Python (OpenCV por pip para 3.11)
+# Instalar con orden específico para evitar conflictos
 RUN python3.11 -m pip install --upgrade pip \
- && python3.11 -m pip install --no-cache-dir -r requirements.txt \
+ && python3.11 -m pip install --no-cache-dir numpy==1.26.2 \
+ && python3.11 -m pip install --no-cache-dir faiss-cpu==1.7.4 \
+ && python3.11 -m pip install --no-cache-dir -r requirements.txt -c constraints.txt \
  && python3.11 -m pip install --no-cache-dir opencv-python-headless
 
 # 7) Playwright + navegadores (con dependencias) y cache compartido

@@ -42,7 +42,6 @@ certifi==2023.11.17
 
 # Data processing
 pandas==2.2.2
-numpy==1.26.2
 python-dateutil==2.8.2
 
 # Task queue
@@ -96,3 +95,4 @@ djangorestframework
 
 # Internationalization
 django-modeltranslation==0.19.1
+faiss-cpu==1.8.0

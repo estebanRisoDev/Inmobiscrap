@@ -1,0 +1,9 @@
+# constraints.txt
+numpy==1.26.4
+faiss-cpu==1.8.0
+scipy<1.14.0
+scikit-learn<1.4.0
+
+# (Ejemplo de límites útiles si usas estas libs)
+# transformers<4.38.0
+# sentence-transformers<2.3.0
