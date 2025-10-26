@@ -15,7 +15,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./database/init:/docker-entrypoint-initdb.d
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -d inmobiscrap_db -U postgres"]
       interval: 5s
@@ -213,8 +213,8 @@ services:
       # PYTHONPATH - Mismo que Django Backend
       PYTHONPATH: "/app:/app/inmobiscrap"
       
-      # Database
-      DATABASE_URL: postgresql://postgres:postgres123@postgre-sql-inmobiscrap:5432/inmobiscrap_db
+      # Databasepostgresql://postgres:postgres123@postgre-sql-inmobiscrap:5432/inmobiscrap_db
+      DATABASE_URL: 
       DB_NAME: inmobiscrap_db
       DB_USER: postgres
       DB_PASSWORD: postgres123
