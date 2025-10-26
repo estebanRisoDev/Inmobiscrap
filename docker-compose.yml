@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   # PostgreSQL Database
   postgre-sql-inmobiscrap:
@@ -143,8 +145,9 @@ services:
       dockerfile: Dockerfile
     container_name: celery-worker-inmobiscrap
     restart: unless-stopped
-    command: celery -A inmobiscrap worker --loglevel=info
+    command: sh -c "cd /app/inmobiscrap && python3.11 -m celery -A inmobiscrap worker --loglevel=info --concurrency=4"
     environment:
+      # PYTHONPATH - Mismo que Django Backend
       PYTHONPATH: "/app:/app/inmobiscrap"
       
       # Database
@@ -205,8 +208,9 @@ services:
       dockerfile: Dockerfile
     container_name: celery-beat-inmobiscrap
     restart: unless-stopped
-    command: celery -A inmobiscrap beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    command: sh -c "cd /app/inmobiscrap && python3.11 -m celery -A inmobiscrap beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler"
     environment:
+      # PYTHONPATH - Mismo que Django Backend
       PYTHONPATH: "/app:/app/inmobiscrap"
       
       # Database
@@ -255,8 +259,31 @@ services:
         condition: service_healthy
       redis-inmobiscrap:
         condition: service_healthy
-      ollama-inmobiscrap:
+      backend-django-inmobiscrap:
         condition: service_started
+    networks:
+      - inmobiscrap_network
+
+  # Flower - Monitoreo de Celery (Opcional pero útil)
+  flower-inmobiscrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flower-inmobiscrap
+    restart: unless-stopped
+    command: sh -c "cd /app/inmobiscrap && python3.11 -m celery -A inmobiscrap flower --port=5555"
+    environment:
+      PYTHONPATH: "/app:/app/inmobiscrap"
+      DJANGO_SETTINGS_MODULE: "inmobiscrap.settings"
+      CELERY_BROKER_URL: redis://redis-inmobiscrap:6379/0
+      CELERY_RESULT_BACKEND: redis://redis-inmobiscrap:6379/0
+    ports:
+      - "5555:5555"
+    volumes:
+      - .:/app
+    depends_on:
+      redis-inmobiscrap:
+        condition: service_healthy
     networks:
       - inmobiscrap_network
 
