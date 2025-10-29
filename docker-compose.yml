@@ -25,7 +25,7 @@ services:
     networks:
       - inmobiscrap_network
 
-  # Ollama LLM Service
+  # Ollama LLM Service - OPTIMIZADO
   ollama-inmobiscrap:
     image: ollama/ollama:latest
     container_name: ollama-inmobiscrap
@@ -38,6 +38,11 @@ services:
       - OLLAMA_ORIGINS=*
       - OLLAMA_HOST=0.0.0.0
       - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_NUM_CTX=16384       # ✅ Aumentado para manejar HTML más grandes
+      - OLLAMA_NUM_BATCH=512        # ✅ Batch size para procesamiento
+      - OLLAMA_NUM_GPU=0            # ✅ Si no tienes GPU, mejor desactivar
+      - OLLAMA_MAX_LOADED_MODELS=1  # ✅ Solo un modelo en memoria
+      - OLLAMA_NUM_PARALLEL=1       # ✅ Procesar una petición a la vez
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:11434/ || exit 1"]
       interval: 10s
@@ -46,11 +51,18 @@ services:
       start_period: 30s
     networks:
       - inmobiscrap_network
+    # Recursos limitados para evitar que consuma toda la memoria
+    deploy:
+      resources:
+        limits:
+          memory: 8G  # Ajusta según tu sistema
+        reservations:
+          memory: 4G
     entrypoint: ["/bin/sh", "-c"]
     command: |
       "ollama serve & 
       sleep 10 && 
-      ollama pull llama3.2 && 
+      ollama pull llama3.1:8b && 
       ollama pull nomic-embed-text && 
       wait"
 
@@ -71,6 +83,8 @@ services:
       start_period: 5s
     networks:
       - inmobiscrap_network
+    # Configuración de Redis para mejor rendimiento
+    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
 
   # Django Backend
   backend-django-inmobiscrap:
@@ -99,20 +113,24 @@ services:
       DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,backend-django-inmobiscrap"
       DJANGO_SETTINGS_MODULE: "inmobiscrap.settings"
 
-      # Ollama
+      # Ollama - OPTIMIZADO
       OLLAMA_BASE_URL: http://ollama-inmobiscrap:11434
-      OLLAMA_MODEL: llama3.2
+      OLLAMA_MODEL: llama3.1:8b
       EMBEDDINGS_MODEL: nomic-embed-text
+      OLLAMA_TIMEOUT: 600  # ✅ 10 minutos de timeout
 
       # Redis/Celery
       REDIS_URL: redis://redis-inmobiscrap:6379/0
       CELERY_BROKER_URL: redis://redis-inmobiscrap:6379/0
       CELERY_RESULT_BACKEND: redis://redis-inmobiscrap:6379/0
+      CELERY_TASK_TIME_LIMIT: 900      # ✅ 15 minutos máximo por tarea
+      CELERY_TASK_SOFT_TIME_LIMIT: 600 # ✅ Soft limit de 10 minutos
 
-      # Scraping Configuration
-      SCRAPEGRAPH_RATE_LIMIT: 15
-      SCRAPEGRAPH_MAX_REQUESTS_PER_HOUR: 20
+      # Scraping Configuration - OPTIMIZADO
+      SCRAPEGRAPH_RATE_LIMIT: 10  # ✅ Reducido para no saturar
+      SCRAPEGRAPH_MAX_REQUESTS_PER_HOUR: 15
       SCRAPEGRAPH_RESPECT_ROBOTS_TXT: "True"
+      SCRAPEGRAPH_TIMEOUT: 60  # ✅ Timeout para descargas
 
       # LibreOffice
       LIBREOFFICE_PATH: /usr/bin/libreoffice
@@ -137,15 +155,23 @@ services:
       - inmobiscrap_network
     tty: true
     stdin_open: true
+    # Recursos para Django
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 512M
 
-  # Celery Worker
+  # Celery Worker - OPTIMIZADO
   celery-worker-inmobiscrap:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: celery-worker-inmobiscrap
     restart: unless-stopped
-    command: sh -c "cd /app/inmobiscrap && python3.11 -m celery -A inmobiscrap worker --loglevel=info --concurrency=4"
+    # ✅ Reducido a 1 worker para evitar problemas de concurrencia con Ollama
+    command: sh -c "cd /app/inmobiscrap && python3.11 -m celery -A inmobiscrap worker --loglevel=info --concurrency=1 --max-tasks-per-child=10"
     environment:
       # PYTHONPATH - Mismo que Django Backend
       PYTHONPATH: "/app:/app/inmobiscrap"
@@ -164,20 +190,26 @@ services:
       DJANGO_ALLOWED_HOSTS: "localhost,127.0.0.1,backend-django-inmobiscrap"
       DJANGO_SETTINGS_MODULE: "inmobiscrap.settings"
 
-      # Ollama
+      # Ollama - OPTIMIZADO
       OLLAMA_BASE_URL: http://ollama-inmobiscrap:11434
-      OLLAMA_MODEL: llama3.2
+      OLLAMA_MODEL: llama3.1:8b
       EMBEDDINGS_MODEL: nomic-embed-text
+      OLLAMA_TIMEOUT: 600
 
-      # Redis/Celery
+      # Redis/Celery - OPTIMIZADO
       REDIS_URL: redis://redis-inmobiscrap:6379/0
       CELERY_BROKER_URL: redis://redis-inmobiscrap:6379/0
       CELERY_RESULT_BACKEND: redis://redis-inmobiscrap:6379/0
+      CELERY_TASK_TIME_LIMIT: 900
+      CELERY_TASK_SOFT_TIME_LIMIT: 600
+      CELERY_WORKER_PREFETCH_MULTIPLIER: 1  # ✅ Solo un task a la vez
+      CELERY_ACKS_LATE: "True"              # ✅ Ack después de completar
 
       # Scraping Configuration
-      SCRAPEGRAPH_RATE_LIMIT: 15
-      SCRAPEGRAPH_MAX_REQUESTS_PER_HOUR: 20
+      SCRAPEGRAPH_RATE_LIMIT: 10
+      SCRAPEGRAPH_MAX_REQUESTS_PER_HOUR: 15
       SCRAPEGRAPH_RESPECT_ROBOTS_TXT: "True"
+      SCRAPEGRAPH_TIMEOUT: 60
 
       # LibreOffice
       LIBREOFFICE_PATH: /usr/bin/libreoffice
@@ -200,6 +232,13 @@ services:
         condition: service_started
     networks:
       - inmobiscrap_network
+    # Recursos para Celery Worker
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+        reservations:
+          memory: 1G
 
   # Celery Beat (tareas programadas)
   celery-beat-inmobiscrap:
@@ -213,8 +252,8 @@ services:
       # PYTHONPATH - Mismo que Django Backend
       PYTHONPATH: "/app:/app/inmobiscrap"
       
-      # Databasepostgresql://postgres:postgres123@postgre-sql-inmobiscrap:5432/inmobiscrap_db
-      DATABASE_URL: 
+      # Database
+      DATABASE_URL: postgresql://postgres:postgres123@postgre-sql-inmobiscrap:5432/inmobiscrap_db
       DB_NAME: inmobiscrap_db
       DB_USER: postgres
       DB_PASSWORD: postgres123
@@ -229,7 +268,7 @@ services:
 
       # Ollama
       OLLAMA_BASE_URL: http://ollama-inmobiscrap:11434
-      OLLAMA_MODEL: llama3.2
+      OLLAMA_MODEL: llama3.1:8b
       EMBEDDINGS_MODEL: nomic-embed-text
 
       # Redis/Celery
@@ -238,8 +277,8 @@ services:
       CELERY_RESULT_BACKEND: redis://redis-inmobiscrap:6379/0
 
       # Scraping Configuration
-      SCRAPEGRAPH_RATE_LIMIT: 15
-      SCRAPEGRAPH_MAX_REQUESTS_PER_HOUR: 20
+      SCRAPEGRAPH_RATE_LIMIT: 10
+      SCRAPEGRAPH_MAX_REQUESTS_PER_HOUR: 15
       SCRAPEGRAPH_RESPECT_ROBOTS_TXT: "True"
 
       # LibreOffice
@@ -264,7 +303,7 @@ services:
     networks:
       - inmobiscrap_network
 
-  # Flower - Monitoreo de Celery (Opcional pero útil)
+  # Flower - Monitoreo de Celery
   flower-inmobiscrap:
     build:
       context: .
