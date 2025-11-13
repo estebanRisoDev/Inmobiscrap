@@ -1,0 +1,6 @@
+@Inmobiscrap_HostAddress = http://localhost:5170
+
+GET {{Inmobiscrap_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
