@@ -1,6 +1,7 @@
 using Inmobiscrap.Data;
 using Inmobiscrap.Services;
 using Inmobiscrap.Jobs;
+using Inmobiscrap.Hubs; // ← AGREGAR ESTO
 using Microsoft.EntityFrameworkCore;
 using Hangfire;
 using Hangfire.PostgreSql;
@@ -75,8 +76,12 @@ builder.Services.AddHangfireServer();
 // Agregar HttpClient
 builder.Services.AddHttpClient();
 
+// ⭐ AGREGAR SIGNALR (ESTO FALTABA)
+builder.Services.AddSignalR();
+
 // Registrar servicios
 builder.Services.AddScoped<IScraperService, ScraperService>();
+builder.Services.AddScoped<IBotLogService, BotLogService>(); // ← ESTO FALTABA
 builder.Services.AddScoped<ScrapingJob>();
 
 // Add services to the container.
@@ -129,6 +134,9 @@ app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
 
+// ⭐ MAPEAR HUB DE SIGNALR (ESTO FALTABA)
+app.MapHub<BotLogHub>("/hubs/botlogs");
+
 // Programar jobs DESPUÉS de que app esté construida
 using (var scope = app.Services.CreateScope())
 {
@@ -145,5 +153,6 @@ var port = Environment.GetEnvironmentVariable("API_PORT") ?? "5000";
 Console.WriteLine($"🚀 API corriendo en http://localhost:{port}");
 Console.WriteLine($"📊 Swagger UI disponible en http://localhost:{port}/swagger");
 Console.WriteLine($"🔧 Hangfire Dashboard en http://localhost:{port}/hangfire");
+Console.WriteLine($"📡 SignalR Hub disponible en ws://localhost:{port}/hubs/botlogs");
 
 app.Run();

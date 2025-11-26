@@ -26,17 +26,20 @@ public class ScraperService : IScraperService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<ScraperService> _logger;
     private readonly IAmazonBedrockRuntime _bedrockClient;
+    private readonly IBotLogService _botLogService;
 
     public ScraperService(
         ApplicationDbContext context,
         IHttpClientFactory httpClientFactory,
         ILogger<ScraperService> logger,
-        IAmazonBedrockRuntime bedrockClient)
+        IAmazonBedrockRuntime bedrockClient,
+        IBotLogService botLogService)
     {
         _context = context;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
         _bedrockClient = bedrockClient;
+        _botLogService = botLogService;
     }
 
     public async Task<List<Property>> ScrapePropertiesAsync(Bot bot)
@@ -45,444 +48,241 @@ public class ScraperService : IScraperService
         
         try
         {
+            // 🔔 LOG: Bot iniciado
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🚀 Bot execution started");
+            
             // Actualizar estado del bot
             bot.Status = "running";
             bot.LastRun = DateTime.UtcNow;
+            bot.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
 
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "📊 Bot status updated to 'running'");
+
             // 1. Descargar HTML
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, $"🌐 Downloading HTML from: {bot.Url}");
             var client = _httpClientFactory.CreateClient();
             var html = await client.GetStringAsync(bot.Url);
             
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, $"✅ HTML downloaded: {html.Length:N0} characters");
             _logger.LogInformation($"Downloaded HTML: {html.Length} characters");
 
-            // 2. Limpiar HTML (eliminar basura genérica)
+            // 2. Limpiar HTML
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🧹 Cleaning HTML (removing scripts, styles, etc.)");
             var cleanedHtml = CleanHtml(html);
             
-            _logger.LogInformation($"Cleaned HTML: {cleanedHtml.Length} characters (reduced {100 - (cleanedHtml.Length * 100 / html.Length)}%)");
+            var reductionPercentage = 100 - (cleanedHtml.Length * 100 / html.Length);
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, 
+                $"✅ HTML cleaned: {cleanedHtml.Length:N0} characters (reduced {reductionPercentage}%)");
+            _logger.LogInformation($"Cleaned HTML: {cleanedHtml.Length} characters (reduced {reductionPercentage}%)");
 
-            // 3. Extraer contenido relevante (solo sección de listados)
+            // 3. Extraer contenido relevante
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🔍 Extracting relevant content (listings section)");
             var relevantHtml = ExtractRelevantContent(cleanedHtml);
             
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, 
+                $"✅ Relevant content extracted: {relevantHtml.Length:N0} characters");
             _logger.LogInformation($"Relevant HTML: {relevantHtml.Length} characters");
 
-            // 4. Usar Bedrock para extraer propiedades estructuradas
+            // 4. Usar Bedrock para extraer propiedades
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🤖 Sending HTML to AWS Bedrock (Claude AI) for processing");
             scrapedProperties = await ExtractPropertiesWithBedrock(relevantHtml, bot);
             
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, 
+                $"✅ AI processing completed: {scrapedProperties.Count} properties found");
+            
             // 5. Guardar propiedades en la BD
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "💾 Checking for duplicates and saving new properties");
             int newPropertiesCount = 0;
-            foreach (var property in scrapedProperties)
+            int duplicatesCount = 0;
+            
+            for (int i = 0; i < scrapedProperties.Count; i++)
             {
-                // Verificar duplicados
-                var exists = await _context.Properties
-                    .AnyAsync(p => p.Title == property.Title && p.Address == property.Address);
+                var property = scrapedProperties[i];
+                
+                // Enviar progreso en tiempo real
+                await _botLogService.SendProgressAsync(bot.Id, bot.Name, i + 1, scrapedProperties.Count, 
+                    $"Processing property: {property.Title?.Substring(0, Math.Min(40, property.Title.Length))}...");
+                
+                // Verificar si ya existe (por título y dirección)
+                var exists = await _context.Properties.AnyAsync(p => 
+                    p.Title == property.Title && p.Address == property.Address);
                 
                 if (!exists)
                 {
                     _context.Properties.Add(property);
                     newPropertiesCount++;
+                    
+                    await _botLogService.LogInfoAsync(bot.Id, bot.Name, 
+                        $"➕ New property added: {property.Title}");
+                }
+                else
+                {
+                    duplicatesCount++;
+                    await _botLogService.LogInfoAsync(bot.Id, bot.Name, 
+                        $"⏭️ Duplicate skipped: {property.Title}");
                 }
             }
-            
+
             await _context.SaveChangesAsync();
             
-            // 6. Actualizar estadísticas del bot
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, 
+                $"💾 Saved {newPropertiesCount} new properties to database (skipped {duplicatesCount} duplicates)");
+
+            // Actualizar estado del bot
             bot.Status = "completed";
-            bot.LastRunCount = newPropertiesCount;
+            bot.LastRunCount = scrapedProperties.Count;
             bot.TotalScraped += newPropertiesCount;
-            bot.LastError = null;
             bot.UpdatedAt = DateTime.UtcNow;
+            bot.LastError = null; // Limpiar error anterior si había
             await _context.SaveChangesAsync();
+
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, 
+                $"🎉 Bot execution completed successfully! Scraped: {scrapedProperties.Count} | New: {newPropertiesCount} | Total: {bot.TotalScraped}");
             
-            _logger.LogInformation(
-                $"Bot '{bot.Name}' completed: {scrapedProperties.Count} found, {newPropertiesCount} new");
+            _logger.LogInformation($"Bot {bot.Id} completed. Scraped {scrapedProperties.Count} properties");
         }
         catch (Exception ex)
         {
+            await _botLogService.LogErrorAsync(bot.Id, bot.Name, 
+                $"❌ Bot execution failed: {ex.Message}", ex);
+            
+            // Actualizar estado de error
             bot.Status = "error";
             bot.LastError = ex.Message;
             bot.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
             
-            _logger.LogError(ex, $"Error scraping with bot '{bot.Name}'");
+            _logger.LogError(ex, $"Error in bot {bot.Id}");
+            throw;
         }
-        
+
         return scrapedProperties;
     }
 
-    /// <summary>
-    /// Limpia el HTML eliminando elementos genéricos que no aportan valor
-    /// </summary>
     private string CleanHtml(string html)
     {
         var doc = new HtmlDocument();
         doc.LoadHtml(html);
 
-        // Lista de elementos a eliminar
-        var tagsToRemove = new[]
-        {
-            "script",      // JavaScript
-            "style",       // CSS inline
-            "noscript",    // Contenido sin JS
-            "iframe",      // Iframes
-            "nav",         // Navegación
-            "header",      // Headers
-            "footer",      // Footers
-            "aside",       // Sidebars
-            "form",        // Formularios (búsqueda, login, etc)
-            "svg",         // Iconos SVG
-            "link",        // Links a CSS
-            "meta",        // Metadatos
-            "img"          // Imágenes
-        };
-
-        foreach (var tag in tagsToRemove)
-        {
-            var nodes = doc.DocumentNode.SelectNodes($"//{tag}");
-            if (nodes != null)
-            {
-                foreach (var node in nodes.ToList())
-                {
-                    node.Remove();
-                }
-            }
-        }
-
-        // Eliminar comentarios HTML
-        var comments = doc.DocumentNode.SelectNodes("//comment()");
-        if (comments != null)
-        {
-            foreach (var comment in comments.ToList())
-            {
-                comment.Remove();
-            }
-        }
-
-        // Eliminar atributos innecesarios (mantener solo id, class para análisis)
-        var attributesToRemove = new[]
-        {
-            "style",
-            "onclick",
-            "onload",
-            "onerror",
-            "data-track",
-            "data-analytics",
-            "aria-label",
-            "aria-hidden"
-        };
-
-        var allNodes = doc.DocumentNode.SelectNodes("//*");
-        if (allNodes != null)
-        {
-            foreach (var node in allNodes)
-            {
-                foreach (var attr in attributesToRemove)
-                {
-                    node.Attributes.Remove(attr);
-                }
-            }
-        }
+        // Remover scripts, styles, etc.
+        doc.DocumentNode.Descendants()
+            .Where(n => n.Name == "script" || n.Name == "style" || n.Name == "svg" || n.Name == "path")
+            .ToList()
+            .ForEach(n => n.Remove());
 
         return doc.DocumentNode.OuterHtml;
     }
 
-    /// <summary>
-    /// Extrae solo el contenido relevante (sección de listados de propiedades)
-    /// </summary>
     private string ExtractRelevantContent(string html)
     {
         var doc = new HtmlDocument();
         doc.LoadHtml(html);
 
-        // Intentar encontrar el contenedor principal de listados
-        var possibleSelectors = new[]
-        {
-            "//main",
-            "//div[contains(@class, 'listings')]",
-            "//div[contains(@class, 'properties')]",
-            "//div[contains(@class, 'results')]",
-            "//div[contains(@class, 'search-results')]",
-            "//section[contains(@class, 'properties')]",
-            "//ul[contains(@class, 'property-list')]",
-            "//div[@id='results']",
-            "//div[@id='listings']"
-        };
+        // Buscar sección de listings (ajusta según tu sitio)
+        var listingsSection = doc.DocumentNode.SelectSingleNode("//main") 
+                           ?? doc.DocumentNode.SelectSingleNode("//div[contains(@class, 'listings')]")
+                           ?? doc.DocumentNode;
 
-        foreach (var selector in possibleSelectors)
-        {
-            var node = doc.DocumentNode.SelectSingleNode(selector);
-            if (node != null && node.InnerHtml.Length > 1000)
-            {
-                _logger.LogInformation($"Found relevant content with selector: {selector}");
-                return node.OuterHtml;
-            }
-        }
-
-        // Si no encontramos nada específico, retornar el body limpio
-        var body = doc.DocumentNode.SelectSingleNode("//body");
-        return body?.OuterHtml ?? html;
+        return listingsSection.OuterHtml;
     }
 
-    /// <summary>
-    /// Usa AWS Bedrock con Claude para extraer propiedades del HTML
-    /// </summary>
     private async Task<List<Property>> ExtractPropertiesWithBedrock(string html, Bot bot)
     {
-        // Truncar HTML si es muy largo
-        const int maxHtmlLength = 150000;
-        if (html.Length > maxHtmlLength)
-        {
-            html = html.Substring(0, maxHtmlLength);
-            _logger.LogWarning($"HTML truncated to {maxHtmlLength} characters");
-        }
-
-        // 🔍 LOG: Ver qué HTML estamos enviando
-        _logger.LogInformation($"📤 HTML being sent to Bedrock (first 2000 chars):\n{html.Substring(0, Math.Min(2000, html.Length))}");
-
-        var prompt = $@"Eres un experto extractor de información de propiedades inmobiliarias.
-
-Analiza el siguiente HTML y extrae TODAS las propiedades que encuentres.
+        var prompt = $@"
+Extrae todas las propiedades inmobiliarias del siguiente HTML.
 
 Para cada propiedad, extrae:
-- title: título o nombre de la propiedad
-- price: precio (solo el número, sin símbolos ni puntos)
-- currency: moneda (CLP, USD, UF)
-- address: dirección completa
-- city: ciudad
-- region: región
-- neighborhood: barrio o comuna
-- bedrooms: número de dormitorios (número entero)
-- bathrooms: número de baños (número entero)
-- area: área en metros cuadrados (número decimal)
-- propertyType: tipo (departamento, casa, oficina, local, terreno, otro)
-- description: descripción breve
+- title: Título de la propiedad
+- price: Precio (solo número, sin símbolos ni puntos)
+- currency: Moneda (CLP, USD, UF, etc.) - por defecto CLP
+- address: Dirección completa
+- city: Ciudad
+- region: Región
+- neighborhood: Barrio/Comuna
+- bedrooms: Número de dormitorios (número)
+- bathrooms: Número de baños (número)
+- area: Superficie en m² (número)
+- propertyType: Tipo (departamento, casa, oficina, terreno, etc.)
+- description: Descripción breve
 
-IMPORTANTE:
-- Responde ÚNICAMENTE con un JSON array válido
-- NO agregues texto antes o después del JSON
-- Si no encuentras un campo, usa null
-- Los números deben ser numéricos, no strings
-
-Formato de respuesta:
-[
-  {{
-    ""title"": ""Hermoso departamento en Providencia"",
-    ""price"": 150000000,
-    ""currency"": ""CLP"",
-    ""address"": ""Av. Providencia 1234"",
-    ""city"": ""Providencia"",
-    ""region"": ""Metropolitana"",
-    ""neighborhood"": ""Providencia"",
-    ""bedrooms"": 3,
-    ""bathrooms"": 2,
-    ""area"": 85.5,
-    ""propertyType"": ""departamento"",
-    ""description"": ""Amplio departamento con vista""
-  }}
-]
+Responde SOLO con un JSON válido con un array de propiedades:
+{{
+  ""properties"": [
+    {{
+      ""title"": ""Departamento en Las Condes"",
+      ""price"": 150000000,
+      ""currency"": ""CLP"",
+      ""address"": ""Av. Apoquindo 1234"",
+      ""city"": ""Santiago"",
+      ""region"": ""Metropolitana"",
+      ""neighborhood"": ""Las Condes"",
+      ""bedrooms"": 3,
+      ""bathrooms"": 2,
+      ""area"": 120.5,
+      ""propertyType"": ""departamento"",
+      ""description"": ""Hermoso departamento con vista panorámica""
+    }}
+  ]
+}}
 
 HTML:
-{html}";
+{html}
+";
 
-        try
+        var request = new ConverseRequest
         {
-            var request = new InvokeModelRequest
+            ModelId = "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+            Messages = new List<Message>
             {
-                ModelId = "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
-                ContentType = "application/json",
-                Accept = "application/json",
-                Body = new MemoryStream(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+                new Message
                 {
-                    anthropic_version = "bedrock-2023-05-31",
-                    max_tokens = 8192,
-                    messages = new[]
+                    Role = "user",
+                    Content = new List<ContentBlock>
                     {
-                        new
-                        {
-                            role = "user",
-                            content = prompt
-                        }
+                        new ContentBlock { Text = prompt }
                     }
-                })))
-            };
-
-            _logger.LogInformation("🚀 Sending request to AWS Bedrock...");
-
-            var response = await _bedrockClient.InvokeModelAsync(request);
-
-            using var reader = new StreamReader(response.Body);
-            var responseBody = await reader.ReadToEndAsync();
-
-            // 🔍 LOG: Ver respuesta completa de Bedrock
-            _logger.LogInformation($"📥 Bedrock RAW response:\n{responseBody}");
-
-            // 🔧 FIX CRÍTICO: Agregar PropertyNameCaseInsensitive para deserializar correctamente
-            var bedrockResponse = JsonSerializer.Deserialize<BedrockResponse>(responseBody, new JsonSerializerOptions
+                }
+            },
+            InferenceConfig = new InferenceConfiguration
             {
-                PropertyNameCaseInsensitive = true
-            });
-
-            if (bedrockResponse?.Content == null || bedrockResponse.Content.Length == 0)
-            {
-                _logger.LogWarning("⚠️ Empty response from Bedrock - Content array is null or empty");
-                return new List<Property>();
+                MaxTokens = 4000,
+                Temperature = 0.3f
             }
+        };
 
-            // Verificar si la respuesta fue truncada
-            if (bedrockResponse.StopReason == "max_tokens")
-            {
-                _logger.LogWarning("⚠️ Response was truncated due to max_tokens limit");
-            }
+        var response = await _bedrockClient.ConverseAsync(request);
+        var jsonResponse = response.Output.Message.Content[0].Text;
 
-            var contentText = bedrockResponse.Content[0].Text;
+        // Limpiar markdown si viene con ```json
+        jsonResponse = jsonResponse.Replace("```json", "").Replace("```", "").Trim();
 
-            // 🔍 LOG: Ver el texto de respuesta de Claude
-            _logger.LogInformation($"📝 Claude response text (first 1000 chars):\n{contentText.Substring(0, Math.Min(1000, contentText.Length))}");
-
-            // Limpiar markdown
-            contentText = contentText.Trim();
-            if (contentText.StartsWith("```json"))
-            {
-                contentText = contentText.Substring(7);
-            }
-            if (contentText.StartsWith("```"))
-            {
-                contentText = contentText.Substring(3);
-            }
-            if (contentText.EndsWith("```"))
-            {
-                contentText = contentText.Substring(0, contentText.Length - 3);
-            }
-            contentText = contentText.Trim();
-
-            _logger.LogInformation($"🧹 Cleaned JSON text (first 500 chars):\n{contentText.Substring(0, Math.Min(500, contentText.Length))}");
-
-            // Parsear JSON con manejo de errores robusto
-            return ParseJsonWithFallback(contentText);
-        }
-        catch (Exception ex)
+        var result = JsonSerializer.Deserialize<BedrockResponse>(jsonResponse, new JsonSerializerOptions
         {
-            _logger.LogError(ex, "❌ Error calling AWS Bedrock");
-            throw;
-        }
+            PropertyNameCaseInsensitive = true
+        });
+
+        return result?.Properties?.Select(p => new Property
+        {
+            Title = p.Title ?? string.Empty,
+            Price = p.Price,
+            Currency = p.Currency ?? "CLP",
+            Address = p.Address,
+            City = p.City,
+            Region = p.Region,
+            Neighborhood = p.Neighborhood,
+            Bedrooms = p.Bedrooms,
+            Bathrooms = p.Bathrooms,
+            Area = p.Area,
+            PropertyType = p.PropertyType,
+            Description = p.Description
+        }).ToList() ?? new List<Property>();
     }
 
-    /// <summary>
-    /// Intenta parsear JSON, y si falla, rescata las propiedades válidas
-    /// </summary>
-    private List<Property> ParseJsonWithFallback(string jsonText)
-    {
-        try
-        {
-            // Intento 1: Parsear JSON completo
-            var propertyDtos = JsonSerializer.Deserialize<List<PropertyDto>>(jsonText, new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            });
-
-            _logger.LogInformation($"✅ Successfully parsed {propertyDtos?.Count ?? 0} properties");
-            return ConvertDtosToProperties(propertyDtos);
-        }
-        catch (JsonException ex)
-        {
-            _logger.LogWarning(ex, "⚠️ JSON parsing failed, attempting to repair...");
-            
-            // Intento 2: Reparar JSON incompleto
-            var repairedJson = RepairIncompleteJson(jsonText);
-            
-            try
-            {
-                var propertyDtos = JsonSerializer.Deserialize<List<PropertyDto>>(repairedJson, new JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true
-                });
-                
-                _logger.LogInformation($"✅ Successfully recovered {propertyDtos?.Count ?? 0} properties from incomplete JSON");
-                return ConvertDtosToProperties(propertyDtos);
-            }
-            catch (JsonException repairEx)
-            {
-                _logger.LogError(repairEx, "❌ Could not repair JSON, returning empty list");
-                _logger.LogDebug($"Failed JSON content: {jsonText}");
-                return new List<Property>();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Intenta reparar JSON incompleto cerrando arrays y objetos
-    /// </summary>
-    private string RepairIncompleteJson(string incompleteJson)
-    {
-        var repaired = incompleteJson.Trim();
-        
-        // Contar llaves y corchetes abiertos
-        int openBraces = repaired.Count(c => c == '{');
-        int closeBraces = repaired.Count(c => c == '}');
-        int openBrackets = repaired.Count(c => c == '[');
-        int closeBrackets = repaired.Count(c => c == ']');
-        
-        // Si está dentro de un objeto incompleto, eliminar hasta el último objeto completo
-        if (openBraces > closeBraces)
-        {
-            // Encontrar el último objeto completo
-            var lastCompleteObject = repaired.LastIndexOf("},");
-            if (lastCompleteObject > 0)
-            {
-                repaired = repaired.Substring(0, lastCompleteObject + 1);
-            }
-        }
-        
-        // Cerrar el array si está abierto
-        if (openBrackets > closeBrackets)
-        {
-            repaired += "\n]";
-        }
-        
-        _logger.LogDebug($"🔧 Repaired JSON: {(repaired.Length > 500 ? repaired.Substring(0, 500) + "..." : repaired)}");
-        return repaired;
-    }
-
-    /// <summary>
-    /// Convierte DTOs a entidades Property
-    /// </summary>
-    private List<Property> ConvertDtosToProperties(List<PropertyDto>? propertyDtos)
-    {
-        if (propertyDtos == null)
-            return new List<Property>();
-        
-        return propertyDtos.Select(dto => new Property
-        {
-            Title = dto.Title ?? string.Empty,
-            Price = dto.Price,
-            Currency = dto.Currency ?? "CLP",
-            Address = dto.Address,
-            City = dto.City,
-            Region = dto.Region,
-            Neighborhood = dto.Neighborhood,
-            Bedrooms = dto.Bedrooms,
-            Bathrooms = dto.Bathrooms,
-            Area = dto.Area,
-            PropertyType = dto.PropertyType,
-            Description = dto.Description
-        }).ToList();
-    }
-
-    // DTOs para deserialización de respuesta de Bedrock
+    // Clases auxiliares para deserialización
     private class BedrockResponse
     {
-        public string? Id { get; set; }
-        public string? Type { get; set; }
-        public string? Role { get; set; }
-        public ContentBlock[]? Content { get; set; }
-        public string? Model { get; set; }
-        public string? StopReason { get; set; }
-    }
-
-    private class ContentBlock
-    {
-        public string? Type { get; set; }
-        public string? Text { get; set; }
+        public List<PropertyDto>? Properties { get; set; }
     }
 
     private class PropertyDto
