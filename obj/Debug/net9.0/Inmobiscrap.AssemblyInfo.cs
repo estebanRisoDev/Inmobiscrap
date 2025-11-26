@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Inmobiscrap")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+71730dab0e4c4a749678c551d76dd23adc91a47e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+90373fa7061419250d4be6e4e0b781eef3484abf")]
 [assembly: System.Reflection.AssemblyProductAttribute("Inmobiscrap")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Inmobiscrap")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
