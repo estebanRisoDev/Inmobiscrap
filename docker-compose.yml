@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -31,6 +29,8 @@ services:
       - AWS_REGION=${AWS_REGION}
       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - BEDROCK_INFERENCE_PROFILE_ID=${BEDROCK_INFERENCE_PROFILE_ID}
+      - SCRAPER_MOCK_MODE=${SCRAPER_MOCK_MODE}
     ports:
       - "${API_PORT:-5000}:8080"
     volumes:

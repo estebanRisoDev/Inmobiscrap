@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Microsoft.Playwright;
 using HtmlAgilityPack;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
@@ -61,8 +62,7 @@ public class ScraperService : IScraperService
 
             // 1. Descargar HTML
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, $"🌐 Downloading HTML from: {bot.Url}");
-            var client = _httpClientFactory.CreateClient();
-            var html = await client.GetStringAsync(bot.Url);
+            var html = await DownloadHtmlAsync(bot);
             
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name, $"✅ HTML downloaded: {html.Length:N0} characters");
             _logger.LogInformation($"Downloaded HTML: {html.Length} characters");
@@ -189,6 +189,13 @@ public class ScraperService : IScraperService
 
     private async Task<List<Property>> ExtractPropertiesWithBedrock(string html, Bot bot)
     {
+        if (IsMockScrapingEnabled())
+        {
+            await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                "Mock scraping enabled; returning synthetic properties without Bedrock.");
+            return BuildMockProperties(bot);
+        }
+
         var prompt = $@"
 Extrae todas las propiedades inmobiliarias del siguiente HTML.
 
@@ -230,9 +237,14 @@ HTML:
 {html}
 ";
 
+        var modelId = Environment.GetEnvironmentVariable("BEDROCK_INFERENCE_PROFILE_ID")
+            ?? Environment.GetEnvironmentVariable("BEDROCK_MODEL_ID")
+            ?? Environment.GetEnvironmentVariable("LLM_MODEL")
+            ?? "anthropic.claude-3-5-sonnet-20241022-v2:0";
+
         var request = new ConverseRequest
         {
-            ModelId = "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+            ModelId = modelId,
             Messages = new List<Message>
             {
                 new Message
@@ -252,7 +264,15 @@ HTML:
         };
 
         var response = await _bedrockClient.ConverseAsync(request);
-        var jsonResponse = response.Output.Message.Content[0].Text;
+        var contentBlocks = response?.Output?.Message?.Content;
+        var jsonResponse = contentBlocks?.FirstOrDefault()?.Text;
+
+        if (string.IsNullOrWhiteSpace(jsonResponse))
+        {
+            await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                "Bedrock returned an empty response; skipping extraction.");
+            return new List<Property>();
+        }
 
         // Limpiar markdown si viene con ```json
         jsonResponse = jsonResponse.Replace("```json", "").Replace("```", "").Trim();
@@ -277,6 +297,107 @@ HTML:
             PropertyType = p.PropertyType,
             Description = p.Description
         }).ToList() ?? new List<Property>();
+    }
+
+    private static bool IsMockScrapingEnabled()
+    {
+        return string.Equals(
+            Environment.GetEnvironmentVariable("SCRAPER_MOCK_MODE"),
+            "true",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static List<Property> BuildMockProperties(Bot bot)
+    {
+        return new List<Property>
+        {
+            new Property
+            {
+                Title = $"Mock property for {bot.Name}",
+                Price = 100000000,
+                Currency = "CLP",
+                Address = "Av. Providencia 123",
+                City = "Santiago",
+                Region = "Metropolitana",
+                Neighborhood = "Providencia",
+                Bedrooms = 3,
+                Bathrooms = 2,
+                Area = 85,
+                PropertyType = "casa",
+                Description = "Mock data generated for testing the pipeline."
+            }
+        };
+    }
+
+    private async Task<string> DownloadHtmlAsync(Bot bot)
+    {
+        var client = _httpClientFactory.CreateClient();
+        client.DefaultRequestHeaders.UserAgent.ParseAdd(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
+        client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("es-CL,es;q=0.9");
+
+        var html = await client.GetStringAsync(bot.Url);
+        if (!IsJavascriptChallenge(html))
+        {
+            return html;
+        }
+
+        await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+            "Detected JavaScript challenge page; retrying with headless browser.");
+
+        try
+        {
+            var renderedHtml = await DownloadHtmlWithPlaywrightAsync(bot.Url);
+            if (!string.IsNullOrWhiteSpace(renderedHtml))
+            {
+                return renderedHtml;
+            }
+        }
+        catch (Exception ex)
+        {
+            await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                $"Playwright failed to render page: {ex.Message}");
+        }
+
+        return html;
+    }
+
+    private static bool IsJavascriptChallenge(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            return false;
+        }
+
+        return html.Contains("requires JavaScript", StringComparison.OrdinalIgnoreCase)
+            || html.Contains("_bmstate", StringComparison.OrdinalIgnoreCase)
+            || html.Contains("verifyChallenge", StringComparison.OrdinalIgnoreCase)
+            || html.Contains("window.location.reload()", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<string> DownloadHtmlWithPlaywrightAsync(string url)
+    {
+        using var playwright = await Playwright.CreateAsync();
+        await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+        {
+            Headless = true
+        });
+
+        var context = await browser.NewContextAsync(new BrowserNewContextOptions
+        {
+            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            Locale = "es-CL",
+            TimezoneId = "America/Santiago"
+        });
+
+        var page = await context.NewPageAsync();
+        await page.GotoAsync(url, new PageGotoOptions
+        {
+            WaitUntil = WaitUntilState.NetworkIdle,
+            Timeout = 60000
+        });
+
+        return await page.ContentAsync();
     }
 
     // Clases auxiliares para deserialización

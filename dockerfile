@@ -30,6 +30,12 @@ COPY . .
 # Verificar que EF Tools está instalado (opcional)
 RUN dotnet ef --version || echo "EF Tools verification"
 
+# Build para generar los scripts de Playwright
+RUN dotnet build "Inmobiscrap.csproj" -c Debug
+
+# Instalar navegadores de Playwright (requerido para scraping dinámico)
+RUN /app/bin/Debug/net9.0/playwright.sh install --with-deps
+
 # Exponer puerto
 EXPOSE 8080
 
