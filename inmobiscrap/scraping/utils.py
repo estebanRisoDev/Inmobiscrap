@@ -3,6 +3,18 @@ import logging
 from decimal import Decimal, InvalidOperation
 from typing import Optional, Dict, Any, List
 
+try:
+    from django.utils.text import slugify
+except ImportError:
+    def slugify(text):
+        """Fallback simple si Django no está disponible"""
+        if not text:
+            return ""
+        text = text.lower().strip()
+        text = re.sub(r'[^\w\s-]', '', text)
+        text = re.sub(r'[-\s]+', '-', text)
+        return text[:100]
+
 logger = logging.getLogger(__name__)
 
 
@@ -243,9 +255,6 @@ def generate_property_slug(titulo: str, codigo: Optional[str] = None) -> str:
     """
     Genera un slug único para una propiedad
     """
-    import re
-    from django.utils.text import slugify
-    
     slug = slugify(titulo)
     
     if codigo:
