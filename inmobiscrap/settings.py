@@ -138,17 +138,8 @@ SIMPLE_JWT = {
 
 # inmobiscrap/settings.py
 
-# CORS Settings - ACTUALIZAR esta sección completa
-CORS_ALLOW_ALL_ORIGINS = DEBUG
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:8080",  # Si usas nginx
-]
-
 # CORS Settings - CONFIGURACIÓN CORREGIDA
-CORS_ALLOW_ALL_ORIGINS = False  # ❌ Cambiado a False para mayor control
+CORS_ALLOW_ALL_ORIGINS = False
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
@@ -182,11 +173,11 @@ CORS_ALLOW_METHODS = [
     'PUT',
 ]
 
-# CRÍTICO: Configuración de Cookies
+# Configuración de Cookies para CORS
 SESSION_COOKIE_SAMESITE = 'Lax'
 CSRF_COOKIE_SAMESITE = 'Lax'
-SESSION_COOKIE_SECURE = False  # False en desarrollo, True en producción
-CSRF_COOKIE_SECURE = False     # False en desarrollo, True en producción
+SESSION_COOKIE_SECURE = False  # True solo en producción con HTTPS
+CSRF_COOKIE_SECURE = False     # True solo en producción con HTTPS
 SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = False   # Debe ser False para que JS pueda leerlo
 
@@ -196,12 +187,6 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://localhost:8080",
 ]
-
-# Configuración de Cookies para CORS
-SESSION_COOKIE_SAMESITE = 'Lax'
-CSRF_COOKIE_SAMESITE = 'Lax'
-SESSION_COOKIE_SECURE = False  # True solo en producción con HTTPS
-CSRF_COOKIE_SECURE = False     # True solo en producción con HTTPS
 
 # Celery Configuration
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://redis-inmobiscrap:6379/0')

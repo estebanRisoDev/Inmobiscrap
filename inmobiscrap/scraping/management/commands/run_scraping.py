@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
-from scraping.models import URLToScrape
-from scraping.tasks import scrape_url_task, scrape_pending_urls
+from inmobiscrap.scraping.models import URLToScrape
+from inmobiscrap.scraping.tasks import scrape_url_task, scrape_pending_urls
 import sys
 
 

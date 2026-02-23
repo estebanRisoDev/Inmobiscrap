@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from scraping.models import (
+from inmobiscrap.scraping.models import (
     URLToScrape, Casa, Departamento, Terreno,
     CasaPrefabricada, ScrapingLog
 )

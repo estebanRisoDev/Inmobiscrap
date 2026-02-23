@@ -6,11 +6,11 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Avg, Count, Q
 from django.utils import timezone
 
-from scraping.models import (
+from inmobiscrap.scraping.models import (
     URLToScrape, Casa, Departamento, Terreno,
     CasaPrefabricada, ScrapingLog
 )
-from scraping.api.serializers import (
+from inmobiscrap.scraping.api.serializers import (
     URLToScrapeSerializer, URLToScrapeListSerializer,
     CasaSerializer, CasaListSerializer,
     DepartamentoSerializer, DepartamentoListSerializer,
@@ -19,7 +19,7 @@ from scraping.api.serializers import (
     ScrapingLogSerializer, BulkURLCreateSerializer,
     ScrapingStatsSerializer
 )
-from scraping.tasks import scrape_url_task
+from inmobiscrap.scraping.tasks import scrape_url_task
 
 
 class URLToScrapeViewSet(viewsets.ModelViewSet):

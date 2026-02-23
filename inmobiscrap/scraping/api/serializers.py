@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from scraping.models import (
+from inmobiscrap.scraping.models import (
     URLToScrape, Casa, Departamento, Terreno, 
     CasaPrefabricada, ScrapingLog
 )

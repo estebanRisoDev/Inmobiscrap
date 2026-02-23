@@ -1,12 +1,12 @@
 from django.contrib import admin
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from scraping.api.views import (
+from inmobiscrap.scraping.api.views import (
     URLToScrapeViewSet, CasaViewSet, DepartamentoViewSet,
     TerrenoViewSet, CasaPrefabricadaViewSet, ScrapingLogViewSet,
     DashboardViewSet
 )
-from scraping.api.auth_views import (
+from inmobiscrap.scraping.api.auth_views import (
     get_csrf_token, login_view, logout_view, check_auth
 )
 

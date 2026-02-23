@@ -17,31 +17,31 @@ app.autodiscover_tasks()
 app.conf.beat_schedule = {
     # Scrapear URLs pendientes cada 6 horas
     'scrape-pending-urls-every-6-hours': {
-        'task': 'scraping.tasks.scrape_pending_urls',
+        'task': 'inmobiscrap.scraping.tasks.scrape_pending_urls',
         'schedule': crontab(minute=0, hour='*/6'),  # Cada 6 horas
     },
     
     # Scrapeo diario a las 2 AM
     'daily-scraping-2am': {
-        'task': 'scraping.tasks.scrape_pending_urls',
+        'task': 'inmobiscrap.scraping.tasks.scrape_pending_urls',
         'schedule': crontab(hour=2, minute=0),  # Todos los días a las 2 AM
     },
     
     # Scrapeo diario a las 2 PM
     'daily-scraping-2pm': {
-        'task': 'scraping.tasks.scrape_pending_urls',
+        'task': 'inmobiscrap.scraping.tasks.scrape_pending_urls',
         'schedule': crontab(hour=14, minute=0),  # Todos los días a las 2 PM
     },
     
     # Limpieza de logs antiguos cada semana (domingos a las 3 AM)
     'cleanup-old-logs-weekly': {
-        'task': 'scraping.tasks.cleanup_old_logs',
+        'task': 'inmobiscrap.scraping.tasks.cleanup_old_logs',
         'schedule': crontab(hour=3, minute=0, day_of_week=0),  # Domingos a las 3 AM
     },
     
     # Desactivar URLs fallidas cada día a las 4 AM
     'deactivate-failed-urls-daily': {
-        'task': 'scraping.tasks.deactivate_failed_urls',
+        'task': 'inmobiscrap.scraping.tasks.deactivate_failed_urls',
         'schedule': crontab(hour=4, minute=0),  # Todos los días a las 4 AM
     },
 }

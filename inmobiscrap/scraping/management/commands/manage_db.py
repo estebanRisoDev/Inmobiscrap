@@ -1,6 +1,6 @@
 from django.core.management.base import BaseCommand
 from django.db.models import Count, Avg, Sum
-from scraping.models import (
+from inmobiscrap.scraping.models import (
     URLToScrape, Casa, Departamento, Terreno,
     CasaPrefabricada, ScrapingLog
 )

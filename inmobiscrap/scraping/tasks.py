@@ -18,7 +18,7 @@ from datetime import timedelta
 
 from bs4 import BeautifulSoup
 from scrapegraphai.graphs import SmartScraperGraph
-from scraping.models import (
+from inmobiscrap.scraping.models import (
     URLToScrape, Casa, Departamento, Terreno,
     CasaPrefabricada, ScrapingLog
 )
