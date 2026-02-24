@@ -34,6 +34,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(p => p.City).HasMaxLength(100);
             entity.Property(p => p.Region).HasMaxLength(100);
             entity.Property(p => p.Neighborhood).HasMaxLength(200);
+            entity.Property(p => p.SourceUrl).HasMaxLength(2000);
             entity.Property(p => p.PropertyType).HasMaxLength(50);
             
             entity.Property(p => p.Description)

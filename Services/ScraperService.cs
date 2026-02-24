@@ -104,9 +104,14 @@ public class ScraperService : IScraperService
                 await _botLogService.SendProgressAsync(bot.Id, bot.Name, i + 1, scrapedProperties.Count, 
                     $"Processing property: {property.Title?.Substring(0, Math.Min(40, property.Title.Length))}...");
                 
-                // Verificar si ya existe (por título y dirección)
+                if (string.IsNullOrWhiteSpace(property.SourceUrl))
+                {
+                    property.SourceUrl = bot.Url;
+                }
+
+                // Verificar si ya existe (por SourceUrl)
                 var exists = await _context.Properties.AnyAsync(p => 
-                    p.Title == property.Title && p.Address == property.Address);
+                    p.SourceUrl == property.SourceUrl);
                 
                 if (!exists)
                 {
@@ -201,6 +206,7 @@ Extrae todas las propiedades inmobiliarias del siguiente HTML.
 
 Para cada propiedad, extrae:
 - title: Título de la propiedad
+- sourceUrl: URL de la propiedad
 - price: Precio (solo número, sin símbolos ni puntos)
 - currency: Moneda (CLP, USD, UF, etc.) - por defecto CLP
 - address: Dirección completa
@@ -218,6 +224,7 @@ Responde SOLO con un JSON válido con un array de propiedades:
   ""properties"": [
     {{
       ""title"": ""Departamento en Las Condes"",
+      ""sourceUrl"": ""https://example.com/propiedad/123"",
       ""price"": 150000000,
       ""currency"": ""CLP"",
       ""address"": ""Av. Apoquindo 1234"",
@@ -285,6 +292,7 @@ HTML:
         return result?.Properties?.Select(p => new Property
         {
             Title = p.Title ?? string.Empty,
+            SourceUrl = string.IsNullOrWhiteSpace(p.SourceUrl) ? bot.Url : p.SourceUrl,
             Price = p.Price,
             Currency = p.Currency ?? "CLP",
             Address = p.Address,
@@ -314,6 +322,7 @@ HTML:
             new Property
             {
                 Title = $"Mock property for {bot.Name}",
+                SourceUrl = bot.Url,
                 Price = 100000000,
                 Currency = "CLP",
                 Address = "Av. Providencia 123",
@@ -409,6 +418,7 @@ HTML:
     private class PropertyDto
     {
         public string? Title { get; set; }
+        public string? SourceUrl { get; set; }
         public decimal? Price { get; set; }
         public string? Currency { get; set; }
         public string? Address { get; set; }

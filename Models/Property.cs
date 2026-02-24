@@ -12,6 +12,7 @@ public class Property
     public string? City { get; set; }
     public string? Region { get; set; }
     public string? Neighborhood { get; set; }
+    public string? SourceUrl { get; set; }
     
     // Características
     public int? Bedrooms { get; set; }
