@@ -80,6 +80,7 @@ builder.Services.AddHttpClient();
 builder.Services.AddSignalR();
 
 // Registrar servicios
+builder.Services.AddSingleton<IBotLogBuffer, BotLogBuffer>(); // Singleton: persiste historial en memoria
 builder.Services.AddScoped<IScraperService, ScraperService>();
 builder.Services.AddScoped<IBotLogService, BotLogService>(); // ← ESTO FALTABA
 builder.Services.AddScoped<ScrapingJob>();

@@ -21,7 +21,7 @@ services:
   api:
     build:
       context: .
-      dockerfile: Dockerfile_server
+      dockerfile: Dockerfile_pc
     container_name: inmobiscrap_api
     environment:
       - ASPNETCORE_ENVIRONMENT=${ASPNETCORE_ENVIRONMENT}
