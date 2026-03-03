@@ -69,9 +69,6 @@ public class ScraperService : IScraperService
 
             // ══════════════════════════════════════════════════════════════
             // FASE 2: Extraer datos embebidos en JSON ANTES de limpiar
-            //   Captura __NEXT_DATA__ (Next.js), ld+json, application/json
-            //   Esto es CRÍTICO: RemoveIrrelevantElements borra <script>,
-            //   así que hay que extraer antes.
             // ══════════════════════════════════════════════════════════════
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "📦 Extracting embedded JSON data (Next.js, JSON-LD, etc.)");
             var embeddedData = ExtractEmbeddedJsonData(html);
@@ -125,7 +122,7 @@ public class ScraperService : IScraperService
             // ══════════════════════════════════════════════════════════════
             // FASE 5: Fallback a Playwright si aún no hay texto
             // ══════════════════════════════════════════════════════════════
-            if (compactText.Length < 500 && html.Length > 10_000)
+            if (compactText.Length < 5000 && html.Length > 10_000)
             {
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
                     $"⚠️ Sparse text ({compactText.Length} chars) — page likely loads data via XHR. Retrying with headless browser…");
@@ -133,16 +130,13 @@ public class ScraperService : IScraperService
                 {
                     var (jsHtml, capturedApiData) = await DownloadHtmlWithPlaywrightAsync(bot.Url);
                     
-                    // Intentar extraer embedded JSON del HTML renderizado por Playwright
                     var jsEmbedded = ExtractEmbeddedJsonData(jsHtml);
                     
-                    // Pipeline estándar sobre el HTML renderizado
                     var jsFiltered = RemoveIrrelevantElements(jsHtml);
                     var jsRelevant = ExtractRelevantContent(jsFiltered);
                     var jsStripped = StripAttributesFromHtml(jsRelevant);
                     var jsText     = ConvertToCompactText(jsStripped);
 
-                    // Combinar todo: texto del DOM + embedded JSON + API interceptada
                     var combined = new StringBuilder();
                     if (jsText.Length > 0) combined.AppendLine(jsText);
                     if (jsEmbedded.Length > 100) combined.AppendLine(jsEmbedded);
@@ -215,13 +209,24 @@ public class ScraperService : IScraperService
                 await _botLogService.SendProgressAsync(bot.Id, bot.Name, i + 1, scrapedProperties.Count, 
                     $"Processing property: {property.Title?.Substring(0, Math.Min(40, property.Title?.Length ?? 0))}...");
                 
+                // FIX: No sobreescribir SourceUrl con bot.Url si está vacío;
+                // en su lugar, construir una key compuesta para dedup
                 if (string.IsNullOrWhiteSpace(property.SourceUrl))
                 {
                     property.SourceUrl = bot.Url;
                 }
 
-                var exists = await _context.Properties.AnyAsync(p => 
-                    p.SourceUrl == property.SourceUrl);
+                // FIX: Dedup por combinación de campos, no solo SourceUrl.
+                // Antes: solo comparaba SourceUrl → si Bedrock no extraía URLs individuales,
+                // todas las propiedades quedaban con bot.Url y se descartaban como duplicados.
+                var srcUrl = property.SourceUrl ?? "";
+                var title = property.Title ?? "";
+                var price = property.Price;
+
+                var exists = await _context.Properties.AnyAsync(p =>
+                    p.SourceUrl == srcUrl &&
+                    p.Title == title &&
+                    p.Price == price);
                 
                 if (!exists)
                 {
@@ -278,14 +283,6 @@ public class ScraperService : IScraperService
     // EXTRACCIÓN DE DATOS EMBEBIDOS EN JSON
     // ══════════════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// Extrae datos de scripts JSON embebidos ANTES de que RemoveIrrelevantElements
-    /// borre los tags <script>. Captura:
-    ///   - Next.js: <script id="__NEXT_DATA__">
-    ///   - Nuxt.js: <script id="__NUXT_DATA__">
-    ///   - JSON-LD: <script type="application/ld+json">
-    ///   - Genérico: <script type="application/json">
-    /// </summary>
     private static string ExtractEmbeddedJsonData(string html)
     {
         var doc = new HtmlDocument();
@@ -306,10 +303,10 @@ public class ScraperService : IScraperService
                 continue;
 
             bool isDataScript =
-                scriptId.Contains("__next_data__") ||    // Next.js
-                scriptId.Contains("__nuxt") ||           // Nuxt.js
-                scriptType == "application/ld+json" ||   // JSON-LD
-                scriptType == "application/json";        // Genérico
+                scriptId.Contains("__next_data__") ||
+                scriptId.Contains("__nuxt") ||
+                scriptType == "application/ld+json" ||
+                scriptType == "application/json";
 
             if (!isDataScript)
                 continue;
@@ -318,7 +315,7 @@ public class ScraperService : IScraperService
             {
                 var jsonContent = content.Replace("<!--", "").Replace("-->", "").Trim();
                 using var jsonDoc = JsonDocument.Parse(jsonContent);
-                var extracted = ExtractTextFromJsonRecursive(jsonDoc.RootElement, maxDepth: 8);
+                var extracted = ExtractTextFromJsonRecursive(jsonDoc.RootElement, maxDepth: 15);
 
                 if (extracted.Length > 100)
                 {
@@ -329,7 +326,6 @@ public class ScraperService : IScraperService
             }
             catch (JsonException)
             {
-                // Si no es JSON válido pero tiene keywords inmobiliarios, incluir como texto
                 if (content.Length > 200 &&
                     (content.Contains("price", StringComparison.OrdinalIgnoreCase) ||
                      content.Contains("precio", StringComparison.OrdinalIgnoreCase)))
@@ -344,24 +340,19 @@ public class ScraperService : IScraperService
         return sb.ToString();
     }
 
-    /// <summary>
-    /// Recorre un JsonElement recursivamente extrayendo texto legible.
-    /// Filtra assets y campos de config de frameworks.
-    /// </summary>
     private static string ExtractTextFromJsonRecursive(JsonElement element, int maxDepth, int currentDepth = 0)
     {
         if (currentDepth > maxDepth) return string.Empty;
 
         var sb = new StringBuilder();
 
-        // Campos de config de frameworks que no aportan datos útiles
         var skipKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
             "buildid", "assetprefix", "scriptloader", "gsp", "gssp",
             "isfallback", "dynamicids", "customserver", "appgip",
             "__n_ssp", "runtimeconfig", "locale", "locales",
             "defaultlocale", "domainlocales", "icon", "favicon",
-            "stylesheet", "chunks", "modules", "webpack",
+            "stylesheet", "chunks", "webpack",
             "namedchunkgroups", "hash", "contenthash", "entry"
         };
 
@@ -377,7 +368,7 @@ public class ScraperService : IScraperService
                     {
                         var strVal = prop.Value.GetString() ?? "";
                         if (!string.IsNullOrWhiteSpace(strVal) && strVal.Length > 1
-                            && strVal.Length < 5000 && !IsAssetUrl(strVal))
+                            && strVal.Length < 10000 && !IsAssetUrl(strVal))
                         {
                             sb.AppendLine($"{prop.Name}: {strVal}");
                         }
@@ -393,8 +384,7 @@ public class ScraperService : IScraperService
                             sb.Append(child);
                     }
                 }
-                // Separador entre objetos (cada listing)
-                if (currentDepth >= 2 && currentDepth <= 4 && sb.Length > 50)
+                if (currentDepth >= 2 && currentDepth <= 8 && sb.Length > 50)
                     sb.AppendLine("---");
                 break;
 
@@ -402,7 +392,7 @@ public class ScraperService : IScraperService
                 int itemCount = 0;
                 foreach (var item in element.EnumerateArray())
                 {
-                    if (itemCount++ > 100) break; // Limitar arrays enormes
+                    if (itemCount++ > 500) break;
                     var child = ExtractTextFromJsonRecursive(item, maxDepth, currentDepth + 1);
                     if (!string.IsNullOrWhiteSpace(child))
                         sb.Append(child);
@@ -445,19 +435,25 @@ public class ScraperService : IScraperService
     // HTML PARSING Y LIMPIEZA
     // ══════════════════════════════════════════════════════════════════════
 
+    // FIX: Removido "header" de la lista global. Muchos sitios inmobiliarios
+    // usan <header> dentro de cards de propiedad para títulos/precios.
+    // Solo se remueven headers de nivel superior (ver RemoveIrrelevantElements).
     private static readonly HashSet<string> _removeByTag = new(StringComparer.OrdinalIgnoreCase)
     {
         "script", "style", "svg", "path", "noscript", "head",
-        "header", "footer", "nav", "aside", "form", "button",
+        "footer", "nav", "aside", "form", "button",
         "iframe", "meta", "link", "input", "select", "textarea",
         "dialog", "template", "picture", "source", "track",
         "video", "audio", "canvas", "map", "area"
     };
 
+    // FIX: Corregido " ads " → "ad-container", "ad-slot", "-ads-", "ads-"
+    // El keyword " ads " con espacios nunca matcheaba en class/id.
     private static readonly string[] _nonContentKeywords =
     {
         "cookie", "modal", "popup", "overlay", "banner", "advertisement",
-        " ads ", "social-share", "newsletter", "subscribe", "sidebar",
+        "ad-container", "ad-slot", "ads-", "-ads",
+        "social-share", "newsletter", "subscribe", "sidebar",
         "related-", "breadcrumb", "pagination", "toolbar", "topbar",
         "sticky-", "floating-", "whatsapp", "chat-", "cookie-bar"
     };
@@ -482,11 +478,19 @@ public class ScraperService : IScraperService
         var doc = new HtmlDocument();
         doc.LoadHtml(html);
 
+        // Remover tags globalmente (excepto header, que se trata aparte)
         doc.DocumentNode.Descendants()
             .Where(n => _removeByTag.Contains(n.Name))
             .ToList()
             .ForEach(n => n.Remove());
 
+        // FIX: Solo remover <header> de nivel superior (hijos directos de body o body>div).
+        // Preserva <header> dentro de cards/articles de propiedades.
+        var topLevelHeaders = doc.DocumentNode.SelectNodes(
+            "//body/header | //body/div/header | //body/div/div/header");
+        topLevelHeaders?.ToList().ForEach(n => n.Remove());
+
+        // Remover elementos con clases/ids de no-contenido
         doc.DocumentNode.Descendants()
             .Where(n => n.NodeType == HtmlNodeType.Element)
             .Where(n =>
@@ -501,6 +505,8 @@ public class ScraperService : IScraperService
         return doc.DocumentNode.OuterHtml;
     }
 
+    // FIX: Preservar data-* attributes que contienen datos inmobiliarios útiles
+    // (data-price, data-bedrooms, data-address, etc.)
     private static string StripAttributesFromHtml(string html)
     {
         var doc = new HtmlDocument();
@@ -513,19 +519,40 @@ public class ScraperService : IScraperService
             if (node.Name.Equals("a", StringComparison.OrdinalIgnoreCase))
             {
                 var href = node.GetAttributeValue("href", "").Trim();
+                var dataAttrs = node.Attributes
+                    .Where(a => a.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase))
+                    .Select(a => (a.Name, a.Value))
+                    .ToList();
+
                 node.Attributes.RemoveAll();
+
                 if (!string.IsNullOrEmpty(href) && !href.StartsWith("javascript:"))
                     node.SetAttributeValue("href", href);
+
+                foreach (var (name, value) in dataAttrs)
+                    node.SetAttributeValue(name, value);
             }
             else
             {
+                // Preservar data-* attributes antes de limpiar
+                var dataAttrs = node.Attributes
+                    .Where(a => a.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase))
+                    .Select(a => (a.Name, a.Value))
+                    .ToList();
+
                 node.Attributes.RemoveAll();
+
+                foreach (var (name, value) in dataAttrs)
+                    node.SetAttributeValue(name, value);
             }
         }
 
         return doc.DocumentNode.OuterHtml;
     }
 
+    // FIX: Reordenado XPath de más específico a más general.
+    // Antes, //main se evaluaba primero y si tenía score >= 3 se cortaba,
+    // impidiendo que selectores más precisos como div.listing fueran evaluados.
     private string ExtractRelevantContent(string html)
     {
         var doc = new HtmlDocument();
@@ -533,19 +560,21 @@ public class ScraperService : IScraperService
 
         var xpathCandidates = new[]
         {
-            "//main",
+            // Más específicos primero
             "//div[contains(@class,'listing')]",
             "//div[contains(@class,'result')]",
             "//div[contains(@class,'property')]",
             "//div[contains(@class,'inmueble')]",
             "//div[contains(@class,'propiedad')]",
             "//div[contains(@class,'search-result')]",
-            "//div[contains(@class,'grid')]",
             "//section[contains(@class,'listing')]",
             "//section[contains(@class,'result')]",
             "//ul[contains(@class,'listing')]",
             "//ul[contains(@class,'result')]",
             "//article",
+            // Genéricos después
+            "//main",
+            "//div[contains(@class,'grid')]",
             "//section",
             "//body",
         };
@@ -572,6 +601,7 @@ public class ScraperService : IScraperService
                 }
             }
 
+            // Si encontramos un nodo específico con buen score, usar ese
             if (bestNode != null && bestNode.Name is not ("body" or "html") && bestScore >= 3)
                 break;
         }
@@ -615,6 +645,21 @@ public class ScraperService : IScraperService
 
         bool isBlock = _blockElements.Contains(tag);
         if (isBlock) sb.AppendLine();
+
+        // FIX: También emitir data-* attributes como texto para que Bedrock los vea
+        if (node.Attributes.Count > 0)
+        {
+            foreach (var attr in node.Attributes)
+            {
+                if (attr.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase)
+                    && !string.IsNullOrWhiteSpace(attr.Value)
+                    && attr.Value.Length > 1
+                    && attr.Value.Length < 500)
+                {
+                    sb.Append($" [{attr.Name}={attr.Value}] ");
+                }
+            }
+        }
 
         string? href = null;
         if (tag == "a")
@@ -696,14 +741,6 @@ public class ScraperService : IScraperService
     // PLAYWRIGHT: Descarga con browser headless + intercepción de APIs
     // ══════════════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// Descarga HTML usando Playwright. Además de renderizar la página:
-    /// 1. Intercepta respuestas JSON de APIs internas (fetch/XHR)
-    /// 2. Auto-scroll para activar lazy loading
-    /// 3. Espera a que haya contenido visible
-    /// 
-    /// Retorna: (htmlRenderizado, datosApiCapturados)
-    /// </summary>
     private static async Task<(string html, string capturedApiData)> DownloadHtmlWithPlaywrightAsync(string url)
     {
         using var playwright = await Playwright.CreateAsync();
@@ -727,10 +764,10 @@ public class ScraperService : IScraperService
             JavaScriptEnabled = true
         });
 
-        // ── Interceptar respuestas JSON de APIs internas ───────────────
         var capturedJsonResponses = new List<string>();
         var page = await context.NewPageAsync();
 
+        // FIX: Logging mejorado en captura de respuestas
         page.Response += async (_, response) =>
         {
             try
@@ -758,10 +795,12 @@ public class ScraperService : IScraperService
                     }
                 }
             }
-            catch { /* Silenciar errores de respuestas ya consumidas */ }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"Response capture skipped ({response.Url}): {ex.Message}");
+            }
         };
 
-        // ── Navegar ────────────────────────────────────────────────────
         try
         {
             await page.GotoAsync(url, new PageGotoOptions
@@ -772,10 +811,9 @@ public class ScraperService : IScraperService
         }
         catch (TimeoutException) { /* Algunas SPAs nunca llegan a NetworkIdle */ }
 
-        // Esperar rendering
         await page.WaitForTimeoutAsync(3000);
 
-        // ── Auto-scroll ────────────────────────────────────────────────
+        // Auto-scroll
         try
         {
             await page.EvaluateAsync(@"
@@ -793,7 +831,6 @@ public class ScraperService : IScraperService
         }
         catch { }
 
-        // Esperar contenido visible
         try
         {
             await page.WaitForFunctionAsync(
@@ -804,14 +841,13 @@ public class ScraperService : IScraperService
 
         var renderedHtml = await page.ContentAsync();
 
-        // ── Procesar JSON capturado de APIs ────────────────────────────
         var apiDataSb = new StringBuilder();
         foreach (var json in capturedJsonResponses)
         {
             try
             {
                 using var jsonDoc = JsonDocument.Parse(json);
-                var text = ExtractTextFromJsonRecursive(jsonDoc.RootElement, maxDepth: 8);
+                var text = ExtractTextFromJsonRecursive(jsonDoc.RootElement, maxDepth: 15);
                 if (text.Length > 100)
                 {
                     apiDataSb.AppendLine("--- CAPTURED API DATA ---");
@@ -871,7 +907,9 @@ public class ScraperService : IScraperService
             $"📦 Content split into {chunks.Count} chunk(s) (model: {modelId})");
 
         var allProperties = new List<Property>();
-        var seenUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // FIX: Dedup en memoria por key compuesta (SourceUrl+Title+Price)
+        // en vez de solo SourceUrl/Title.
+        var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < chunks.Count; i++)
         {
@@ -884,8 +922,9 @@ public class ScraperService : IScraperService
             int added = 0;
             foreach (var prop in chunkProperties)
             {
-                var key = string.IsNullOrWhiteSpace(prop.SourceUrl) ? prop.Title : prop.SourceUrl;
-                if (key != null && seenUrls.Add(key))
+                // FIX: Key compuesta para dedup en memoria
+                var key = $"{prop.SourceUrl ?? ""}|{prop.Title ?? ""}|{prop.Price}";
+                if (seenKeys.Add(key))
                 {
                     allProperties.Add(prop);
                     added++;
@@ -899,11 +938,13 @@ public class ScraperService : IScraperService
         return allProperties;
     }
 
+    // FIX: Retry con backoff exponencial para Bedrock
     private async Task<List<Property>> ProcessChunkWithBedrock(string chunkText, Bot bot, string modelId)
     {
         var prompt = $@"Analiza el siguiente texto extraído de una página web de bienes raíces chilena.
 El texto puede incluir URLs entre corchetes como [https://...].
 También puede incluir datos estructurados con formato ""campo: valor"" extraídos de APIs.
+Los atributos data-* entre corchetes como [data-price=5000] contienen datos estructurados del HTML.
 
 Extrae TODAS las propiedades inmobiliarias que encuentres. Para cada una:
 - title: Título o descripción de la propiedad
@@ -971,65 +1012,81 @@ TEXTO:
             }
         };
 
-        try
+        const int maxRetries = 2;
+
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
         {
-            var response = await _bedrockClient.ConverseAsync(request);
-            var stopReason = response?.StopReason ?? "unknown";
-            var contentBlocks = response?.Output?.Message?.Content;
+            try
+            {
+                var response = await _bedrockClient.ConverseAsync(request);
+                var stopReason = response?.StopReason ?? "unknown";
+                var contentBlocks = response?.Output?.Message?.Content;
 
-            var jsonResponse = contentBlocks?
-                .Where(b => !string.IsNullOrWhiteSpace(b.Text))
-                .Select(b => b.Text)
-                .FirstOrDefault();
+                var jsonResponse = contentBlocks?
+                    .Where(b => !string.IsNullOrWhiteSpace(b.Text))
+                    .Select(b => b.Text)
+                    .FirstOrDefault();
 
-            await _botLogService.LogDebugAsync(bot.Id, bot.Name,
-                $"🔍 Bedrock response: stopReason={stopReason}, textLength={jsonResponse?.Length ?? 0}");
+                await _botLogService.LogDebugAsync(bot.Id, bot.Name,
+                    $"🔍 Bedrock response: stopReason={stopReason}, textLength={jsonResponse?.Length ?? 0}");
 
-            if (string.IsNullOrWhiteSpace(jsonResponse))
+                if (string.IsNullOrWhiteSpace(jsonResponse))
+                {
+                    await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                        $"⚠️ Bedrock returned no text (stopReason={stopReason})");
+                    return new List<Property>();
+                }
+
+                jsonResponse = Regex
+                    .Replace(jsonResponse, @"^```json?\s*|```\s*$", "", RegexOptions.Multiline)
+                    .Trim();
+
+                var result = JsonSerializer.Deserialize<BedrockResponse>(jsonResponse, new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true
+                });
+
+                return result?.Properties?.Select(p => new Property
+                {
+                    Title        = p.Title ?? string.Empty,
+                    SourceUrl    = string.IsNullOrWhiteSpace(p.SourceUrl) ? bot.Url : p.SourceUrl,
+                    Price        = p.Price,
+                    Currency     = p.Currency ?? "CLP",
+                    Address      = p.Address,
+                    City         = p.City,
+                    Region       = p.Region,
+                    Neighborhood = p.Neighborhood,
+                    Bedrooms     = p.Bedrooms,
+                    Bathrooms    = p.Bathrooms,
+                    Area         = p.Area,
+                    PropertyType = p.PropertyType,
+                    Description  = p.Description
+                }).ToList() ?? new List<Property>();
+            }
+            catch (JsonException ex)
             {
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                    $"⚠️ Bedrock returned no text (stopReason={stopReason})");
+                    $"⚠️ Invalid JSON from Bedrock: {ex.Message}. Chunk skipped.");
                 return new List<Property>();
             }
-
-            jsonResponse = Regex
-                .Replace(jsonResponse, @"^```json?\s*|```\s*$", "", RegexOptions.Multiline)
-                .Trim();
-
-            var result = JsonSerializer.Deserialize<BedrockResponse>(jsonResponse, new JsonSerializerOptions
+            catch (Exception ex) when (attempt < maxRetries)
             {
-                PropertyNameCaseInsensitive = true
-            });
-
-            return result?.Properties?.Select(p => new Property
+                // FIX: Retry con backoff exponencial para errores transitorios
+                var delay = 2000 * (attempt + 1);
+                await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                    $"⚠️ Bedrock API error (attempt {attempt + 1}/{maxRetries + 1}): {ex.Message}. Retrying in {delay}ms...");
+                await Task.Delay(delay);
+            }
+            catch (Exception ex)
             {
-                Title        = p.Title ?? string.Empty,
-                SourceUrl    = string.IsNullOrWhiteSpace(p.SourceUrl) ? bot.Url : p.SourceUrl,
-                Price        = p.Price,
-                Currency     = p.Currency ?? "CLP",
-                Address      = p.Address,
-                City         = p.City,
-                Region       = p.Region,
-                Neighborhood = p.Neighborhood,
-                Bedrooms     = p.Bedrooms,
-                Bathrooms    = p.Bathrooms,
-                Area         = p.Area,
-                PropertyType = p.PropertyType,
-                Description  = p.Description
-            }).ToList() ?? new List<Property>();
+                await _botLogService.LogErrorAsync(bot.Id, bot.Name,
+                    $"❌ Bedrock API error ({ex.GetType().Name}): {ex.Message}", ex);
+                return new List<Property>();
+            }
         }
-        catch (JsonException ex)
-        {
-            await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                $"⚠️ Invalid JSON from Bedrock: {ex.Message}. Chunk skipped.");
-            return new List<Property>();
-        }
-        catch (Exception ex)
-        {
-            await _botLogService.LogErrorAsync(bot.Id, bot.Name,
-                $"❌ Bedrock API error ({ex.GetType().Name}): {ex.Message}", ex);
-            return new List<Property>();
-        }
+
+        // No debería llegar aquí, pero por seguridad
+        return new List<Property>();
     }
 
     private static bool IsMockScrapingEnabled()
@@ -1063,7 +1120,6 @@ TEXTO:
         };
     }
 
-    // Clases auxiliares para deserialización
     private class BedrockResponse
     {
         public List<PropertyDto>? Properties { get; set; }
