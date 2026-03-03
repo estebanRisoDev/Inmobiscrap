@@ -44,14 +44,51 @@ public class ScraperService : IScraperService
         _botLogService = botLogService;
     }
 
+    // ══════════════════════════════════════════════════════════════════════
+    // STOP SIGNAL HELPERS
+    // ══════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Verifica si el bot recibió señal de detención desde la UI.
+    /// Usa AsNoTracking para no interferir con el contexto de EF actual.
+    /// </summary>
+    private async Task<bool> IsBotStoppingAsync(int botId)
+    {
+        var status = await _context.Bots
+            .AsNoTracking()
+            .Where(b => b.Id == botId)
+            .Select(b => b.Status)
+            .FirstOrDefaultAsync();
+
+        return status == "stopping";
+    }
+
+    /// <summary>
+    /// Maneja la detención limpia del bot: loguea, actualiza estado y retorna.
+    /// </summary>
+    private async Task HandleStopAsync(Bot bot, int newCount)
+    {
+        await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+            $"🛑 Bot detenido manualmente. Propiedades guardadas en esta sesión: {newCount}");
+
+        bot.Status = "stopped";
+        bot.UpdatedAt = DateTime.UtcNow;
+        bot.LastError = null;
+        await _context.SaveChangesAsync();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // MAIN SCRAPING METHOD
+    // ══════════════════════════════════════════════════════════════════════
+
     public async Task<List<Property>> ScrapePropertiesAsync(Bot bot)
     {
         var scrapedProperties = new List<Property>();
-        
+
         try
         {
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🚀 Bot execution started");
-            
+
             // Actualizar estado del bot
             bot.Status = "running";
             bot.LastRun = DateTime.UtcNow;
@@ -67,6 +104,13 @@ public class ScraperService : IScraperService
             var html = await DownloadHtmlAsync(bot);
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name, $"✅ HTML downloaded: {html.Length:N0} characters");
 
+            // ── CHEQUEO STOP después de descarga ─────────────────────────
+            if (await IsBotStoppingAsync(bot.Id))
+            {
+                await HandleStopAsync(bot, 0);
+                return scrapedProperties;
+            }
+
             // ══════════════════════════════════════════════════════════════
             // FASE 2: Extraer datos embebidos en JSON ANTES de limpiar
             // ══════════════════════════════════════════════════════════════
@@ -81,6 +125,13 @@ public class ScraperService : IScraperService
             {
                 await _botLogService.LogInfoAsync(bot.Id, bot.Name,
                     "ℹ️ No embedded JSON data found (site may load data via XHR)");
+            }
+
+            // ── CHEQUEO STOP después de extracción JSON ───────────────────
+            if (await IsBotStoppingAsync(bot.Id))
+            {
+                await HandleStopAsync(bot, 0);
+                return scrapedProperties;
             }
 
             // ══════════════════════════════════════════════════════════════
@@ -119,8 +170,15 @@ public class ScraperService : IScraperService
                 }
             }
 
+            // ── CHEQUEO STOP antes del fallback Playwright ────────────────
+            if (await IsBotStoppingAsync(bot.Id))
+            {
+                await HandleStopAsync(bot, 0);
+                return scrapedProperties;
+            }
+
             // ══════════════════════════════════════════════════════════════
-            // FASE 5: Fallback a Playwright si aún no hay texto
+            // FASE 5: Fallback a Playwright si aún no hay texto suficiente
             // ══════════════════════════════════════════════════════════════
             if (compactText.Length < 5000 && html.Length > 10_000)
             {
@@ -129,17 +187,23 @@ public class ScraperService : IScraperService
                 try
                 {
                     var (jsHtml, capturedApiData) = await DownloadHtmlWithPlaywrightAsync(bot.Url);
-                    
+
+                    // ── CHEQUEO STOP después de Playwright (puede tardar bastante) ──
+                    if (await IsBotStoppingAsync(bot.Id))
+                    {
+                        await HandleStopAsync(bot, 0);
+                        return scrapedProperties;
+                    }
+
                     var jsEmbedded = ExtractEmbeddedJsonData(jsHtml);
-                    
                     var jsFiltered = RemoveIrrelevantElements(jsHtml);
                     var jsRelevant = ExtractRelevantContent(jsFiltered);
                     var jsStripped = StripAttributesFromHtml(jsRelevant);
                     var jsText     = ConvertToCompactText(jsStripped);
 
                     var combined = new StringBuilder();
-                    if (jsText.Length > 0) combined.AppendLine(jsText);
-                    if (jsEmbedded.Length > 100) combined.AppendLine(jsEmbedded);
+                    if (jsText.Length > 0)          combined.AppendLine(jsText);
+                    if (jsEmbedded.Length > 100)    combined.AppendLine(jsEmbedded);
                     if (capturedApiData.Length > 100) combined.AppendLine(capturedApiData);
 
                     var playwrightResult = combined.ToString().Trim();
@@ -184,94 +248,114 @@ public class ScraperService : IScraperService
 
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
                 $"✅ Compact text ready: {compactText.Length:N0} characters");
-            _logger.LogInformation($"Compact text: {compactText.Length} characters");
+
+            // ── CHEQUEO STOP antes de llamar a Bedrock (la llamada más costosa) ──
+            if (await IsBotStoppingAsync(bot.Id))
+            {
+                await HandleStopAsync(bot, 0);
+                return scrapedProperties;
+            }
 
             // ══════════════════════════════════════════════════════════════
             // FASE 7: Enviar a Bedrock
             // ══════════════════════════════════════════════════════════════
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🤖 Sending to AWS Bedrock (Claude AI) for processing");
             scrapedProperties = await ExtractPropertiesWithBedrock(compactText, bot);
-            
-            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, 
+
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
                 $"✅ AI processing completed: {scrapedProperties.Count} properties found");
-            
+
+            // ── CHEQUEO STOP antes de guardar en BD ──────────────────────
+            if (await IsBotStoppingAsync(bot.Id))
+            {
+                await HandleStopAsync(bot, 0);
+                return scrapedProperties;
+            }
+
             // ══════════════════════════════════════════════════════════════
             // FASE 8: Guardar propiedades en la BD
             // ══════════════════════════════════════════════════════════════
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "💾 Checking for duplicates and saving new properties");
             int newPropertiesCount = 0;
             int duplicatesCount = 0;
-            
+
             for (int i = 0; i < scrapedProperties.Count; i++)
             {
-                var property = scrapedProperties[i];
-                
-                await _botLogService.SendProgressAsync(bot.Id, bot.Name, i + 1, scrapedProperties.Count, 
-                    $"Processing property: {property.Title?.Substring(0, Math.Min(40, property.Title?.Length ?? 0))}...");
-                
-                // FIX: No sobreescribir SourceUrl con bot.Url si está vacío;
-                // en su lugar, construir una key compuesta para dedup
-                if (string.IsNullOrWhiteSpace(property.SourceUrl))
+                // ── CHEQUEO STOP cada 5 propiedades ──────────────────────
+                if (i % 5 == 0 && await IsBotStoppingAsync(bot.Id))
                 {
-                    property.SourceUrl = bot.Url;
+                    await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                        $"⚠️ Stop signal received. Halting at {i}/{scrapedProperties.Count} properties.");
+                    break;
                 }
 
-                // FIX: Dedup por combinación de campos, no solo SourceUrl.
-                // Antes: solo comparaba SourceUrl → si Bedrock no extraía URLs individuales,
-                // todas las propiedades quedaban con bot.Url y se descartaban como duplicados.
+                var property = scrapedProperties[i];
+
+                await _botLogService.SendProgressAsync(bot.Id, bot.Name, i + 1, scrapedProperties.Count,
+                    $"Processing property: {property.Title?.Substring(0, Math.Min(40, property.Title?.Length ?? 0))}...");
+
+                if (string.IsNullOrWhiteSpace(property.SourceUrl))
+                    property.SourceUrl = bot.Url;
+
                 var srcUrl = property.SourceUrl ?? "";
-                var title = property.Title ?? "";
-                var price = property.Price;
+                var title  = property.Title ?? "";
+                var price  = property.Price;
 
                 var exists = await _context.Properties.AnyAsync(p =>
                     p.SourceUrl == srcUrl &&
                     p.Title == title &&
                     p.Price == price);
-                
+
                 if (!exists)
                 {
                     _context.Properties.Add(property);
                     newPropertiesCount++;
-                    
-                    await _botLogService.LogInfoAsync(bot.Id, bot.Name, 
+                    await _botLogService.LogInfoAsync(bot.Id, bot.Name,
                         $"➕ New property added: {property.Title}");
                 }
                 else
                 {
                     duplicatesCount++;
-                    await _botLogService.LogInfoAsync(bot.Id, bot.Name, 
+                    await _botLogService.LogInfoAsync(bot.Id, bot.Name,
                         $"⏭️ Duplicate skipped: {property.Title}");
                 }
             }
 
             await _context.SaveChangesAsync();
-            
-            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, 
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
                 $"💾 Saved {newPropertiesCount} new properties (skipped {duplicatesCount} duplicates)");
 
-            // Actualizar estado del bot
-            bot.Status = "completed";
+            // ══════════════════════════════════════════════════════════════
+            // FASE 9: Actualizar estado final del bot
+            // Refrescamos desde BD para leer el status real (puede ser "stopping")
+            // ══════════════════════════════════════════════════════════════
+            await _context.Entry(bot).ReloadAsync();
+            var wasStopped = bot.Status == "stopping";
+
+            bot.Status       = wasStopped ? "stopped" : "completed";
             bot.LastRunCount = scrapedProperties.Count;
             bot.TotalScraped += newPropertiesCount;
-            bot.UpdatedAt = DateTime.UtcNow;
-            bot.LastError = null;
+            bot.UpdatedAt    = DateTime.UtcNow;
+            bot.LastError    = null;
             await _context.SaveChangesAsync();
 
-            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, 
-                $"🎉 Bot execution completed! Scraped: {scrapedProperties.Count} | New: {newPropertiesCount} | Total: {bot.TotalScraped}");
-            
-            _logger.LogInformation($"Bot {bot.Id} completed. Scraped {scrapedProperties.Count} properties");
+            var finalMsg = wasStopped
+                ? $"🛑 Bot detenido manualmente. Guardadas: {newPropertiesCount} | Total acumulado: {bot.TotalScraped}"
+                : $"🎉 Bot execution completed! Scraped: {scrapedProperties.Count} | New: {newPropertiesCount} | Total: {bot.TotalScraped}";
+
+            await _botLogService.LogSuccessAsync(bot.Id, bot.Name, finalMsg);
+            _logger.LogInformation($"Bot {bot.Id} finished with status '{bot.Status}'. Scraped {scrapedProperties.Count} properties.");
         }
         catch (Exception ex)
         {
-            await _botLogService.LogErrorAsync(bot.Id, bot.Name, 
+            await _botLogService.LogErrorAsync(bot.Id, bot.Name,
                 $"❌ Bot execution failed: {ex.Message}", ex);
-            
-            bot.Status = "error";
+
+            bot.Status    = "error";
             bot.LastError = ex.Message;
             bot.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
-            
+
             _logger.LogError(ex, $"Error in bot {bot.Id}");
             throw;
         }
@@ -296,8 +380,8 @@ public class ScraperService : IScraperService
         foreach (var script in scriptNodes)
         {
             var scriptType = script.GetAttributeValue("type", "").ToLower();
-            var scriptId = script.GetAttributeValue("id", "").ToLower();
-            var content = script.InnerText.Trim();
+            var scriptId   = script.GetAttributeValue("id",   "").ToLower();
+            var content    = script.InnerText.Trim();
 
             if (string.IsNullOrEmpty(content) || content.Length < 50)
                 continue;
@@ -308,8 +392,7 @@ public class ScraperService : IScraperService
                 scriptType == "application/ld+json" ||
                 scriptType == "application/json";
 
-            if (!isDataScript)
-                continue;
+            if (!isDataScript) continue;
 
             try
             {
@@ -361,8 +444,7 @@ public class ScraperService : IScraperService
             case JsonValueKind.Object:
                 foreach (var prop in element.EnumerateObject())
                 {
-                    if (skipKeys.Contains(prop.Name))
-                        continue;
+                    if (skipKeys.Contains(prop.Name)) continue;
 
                     if (prop.Value.ValueKind == JsonValueKind.String)
                     {
@@ -411,11 +493,9 @@ public class ScraperService : IScraperService
 
     private static bool IsAssetUrl(string value)
     {
-        if (string.IsNullOrEmpty(value) || value.Length < 10)
-            return false;
+        if (string.IsNullOrEmpty(value) || value.Length < 10) return false;
 
-        if (value.StartsWith("data:image", StringComparison.OrdinalIgnoreCase))
-            return true;
+        if (value.StartsWith("data:image", StringComparison.OrdinalIgnoreCase)) return true;
 
         if (value.StartsWith("http", StringComparison.OrdinalIgnoreCase))
         {
@@ -435,9 +515,6 @@ public class ScraperService : IScraperService
     // HTML PARSING Y LIMPIEZA
     // ══════════════════════════════════════════════════════════════════════
 
-    // FIX: Removido "header" de la lista global. Muchos sitios inmobiliarios
-    // usan <header> dentro de cards de propiedad para títulos/precios.
-    // Solo se remueven headers de nivel superior (ver RemoveIrrelevantElements).
     private static readonly HashSet<string> _removeByTag = new(StringComparer.OrdinalIgnoreCase)
     {
         "script", "style", "svg", "path", "noscript", "head",
@@ -447,8 +524,6 @@ public class ScraperService : IScraperService
         "video", "audio", "canvas", "map", "area"
     };
 
-    // FIX: Corregido " ads " → "ad-container", "ad-slot", "-ads-", "ads-"
-    // El keyword " ads " con espacios nunca matcheaba en class/id.
     private static readonly string[] _nonContentKeywords =
     {
         "cookie", "modal", "popup", "overlay", "banner", "advertisement",
@@ -478,19 +553,16 @@ public class ScraperService : IScraperService
         var doc = new HtmlDocument();
         doc.LoadHtml(html);
 
-        // Remover tags globalmente (excepto header, que se trata aparte)
         doc.DocumentNode.Descendants()
             .Where(n => _removeByTag.Contains(n.Name))
             .ToList()
             .ForEach(n => n.Remove());
 
-        // FIX: Solo remover <header> de nivel superior (hijos directos de body o body>div).
-        // Preserva <header> dentro de cards/articles de propiedades.
+        // Solo remover <header> de nivel superior
         var topLevelHeaders = doc.DocumentNode.SelectNodes(
             "//body/header | //body/div/header | //body/div/div/header");
         topLevelHeaders?.ToList().ForEach(n => n.Remove());
 
-        // Remover elementos con clases/ids de no-contenido
         doc.DocumentNode.Descendants()
             .Where(n => n.NodeType == HtmlNodeType.Element)
             .Where(n =>
@@ -505,8 +577,6 @@ public class ScraperService : IScraperService
         return doc.DocumentNode.OuterHtml;
     }
 
-    // FIX: Preservar data-* attributes que contienen datos inmobiliarios útiles
-    // (data-price, data-bedrooms, data-address, etc.)
     private static string StripAttributesFromHtml(string html)
     {
         var doc = new HtmlDocument();
@@ -534,7 +604,6 @@ public class ScraperService : IScraperService
             }
             else
             {
-                // Preservar data-* attributes antes de limpiar
                 var dataAttrs = node.Attributes
                     .Where(a => a.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase))
                     .Select(a => (a.Name, a.Value))
@@ -550,9 +619,6 @@ public class ScraperService : IScraperService
         return doc.DocumentNode.OuterHtml;
     }
 
-    // FIX: Reordenado XPath de más específico a más general.
-    // Antes, //main se evaluaba primero y si tenía score >= 3 se cortaba,
-    // impidiendo que selectores más precisos como div.listing fueran evaluados.
     private string ExtractRelevantContent(string html)
     {
         var doc = new HtmlDocument();
@@ -560,7 +626,6 @@ public class ScraperService : IScraperService
 
         var xpathCandidates = new[]
         {
-            // Más específicos primero
             "//div[contains(@class,'listing')]",
             "//div[contains(@class,'result')]",
             "//div[contains(@class,'property')]",
@@ -572,7 +637,6 @@ public class ScraperService : IScraperService
             "//ul[contains(@class,'listing')]",
             "//ul[contains(@class,'result')]",
             "//article",
-            // Genéricos después
             "//main",
             "//div[contains(@class,'grid')]",
             "//section",
@@ -601,7 +665,6 @@ public class ScraperService : IScraperService
                 }
             }
 
-            // Si encontramos un nodo específico con buen score, usar ese
             if (bestNode != null && bestNode.Name is not ("body" or "html") && bestScore >= 3)
                 break;
         }
@@ -640,24 +703,20 @@ public class ScraperService : IScraperService
         if (node.NodeType != HtmlNodeType.Element) return;
 
         var tag = node.Name.ToLower();
-
         if (tag is "script" or "style" or "svg" or "noscript" or "head") return;
 
         bool isBlock = _blockElements.Contains(tag);
         if (isBlock) sb.AppendLine();
 
-        // FIX: También emitir data-* attributes como texto para que Bedrock los vea
-        if (node.Attributes.Count > 0)
+        // Emitir data-* como texto para que Bedrock los vea
+        foreach (var attr in node.Attributes)
         {
-            foreach (var attr in node.Attributes)
+            if (attr.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase)
+                && !string.IsNullOrWhiteSpace(attr.Value)
+                && attr.Value.Length > 1
+                && attr.Value.Length < 500)
             {
-                if (attr.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrWhiteSpace(attr.Value)
-                    && attr.Value.Length > 1
-                    && attr.Value.Length < 500)
-                {
-                    sb.Append($" [{attr.Name}={attr.Value}] ");
-                }
+                sb.Append($" [{attr.Name}={attr.Value}] ");
             }
         }
 
@@ -702,9 +761,7 @@ public class ScraperService : IScraperService
 
         var html = await client.GetStringAsync(bot.Url);
         if (!IsJavascriptChallenge(html))
-        {
             return html;
-        }
 
         await _botLogService.LogWarningAsync(bot.Id, bot.Name,
             "Detected JavaScript challenge page; retrying with headless browser.");
@@ -713,9 +770,7 @@ public class ScraperService : IScraperService
         {
             var (renderedHtml, _) = await DownloadHtmlWithPlaywrightAsync(bot.Url);
             if (!string.IsNullOrWhiteSpace(renderedHtml))
-            {
                 return renderedHtml;
-            }
         }
         catch (Exception ex)
         {
@@ -728,12 +783,11 @@ public class ScraperService : IScraperService
 
     private static bool IsJavascriptChallenge(string html)
     {
-        if (string.IsNullOrWhiteSpace(html))
-            return false;
+        if (string.IsNullOrWhiteSpace(html)) return false;
 
         return html.Contains("requires JavaScript", StringComparison.OrdinalIgnoreCase)
-            || html.Contains("_bmstate", StringComparison.OrdinalIgnoreCase)
-            || html.Contains("verifyChallenge", StringComparison.OrdinalIgnoreCase)
+            || html.Contains("_bmstate",            StringComparison.OrdinalIgnoreCase)
+            || html.Contains("verifyChallenge",     StringComparison.OrdinalIgnoreCase)
             || html.Contains("window.location.reload()", StringComparison.OrdinalIgnoreCase);
     }
 
@@ -757,9 +811,9 @@ public class ScraperService : IScraperService
 
         var context = await browser.NewContextAsync(new BrowserNewContextOptions
         {
-            UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-            Locale = "es-CL",
-            TimezoneId = "America/Santiago",
+            UserAgent    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            Locale       = "es-CL",
+            TimezoneId   = "America/Santiago",
             ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
             JavaScriptEnabled = true
         });
@@ -767,14 +821,13 @@ public class ScraperService : IScraperService
         var capturedJsonResponses = new List<string>();
         var page = await context.NewPageAsync();
 
-        // FIX: Logging mejorado en captura de respuestas
         page.Response += async (_, response) =>
         {
             try
             {
                 var responseUrl = response.Url;
                 var contentType = response.Headers.GetValueOrDefault("content-type", "");
-                var status = response.Status;
+                var status      = response.Status;
 
                 bool isJson = contentType.Contains("application/json") || contentType.Contains("text/json");
                 bool isDataEndpoint = !responseUrl.Contains(".js")
@@ -790,9 +843,7 @@ public class ScraperService : IScraperService
                 {
                     var body = await response.TextAsync();
                     if (body.Length > 500)
-                    {
                         capturedJsonResponses.Add(body);
-                    }
                 }
             }
             catch (Exception ex)
@@ -806,14 +857,14 @@ public class ScraperService : IScraperService
             await page.GotoAsync(url, new PageGotoOptions
             {
                 WaitUntil = WaitUntilState.NetworkIdle,
-                Timeout = 45000
+                Timeout   = 45000
             });
         }
         catch (TimeoutException) { /* Algunas SPAs nunca llegan a NetworkIdle */ }
 
         await page.WaitForTimeoutAsync(3000);
 
-        // Auto-scroll
+        // Auto-scroll para disparar lazy loading
         try
         {
             await page.EvaluateAsync(@"
@@ -907,12 +958,18 @@ public class ScraperService : IScraperService
             $"📦 Content split into {chunks.Count} chunk(s) (model: {modelId})");
 
         var allProperties = new List<Property>();
-        // FIX: Dedup en memoria por key compuesta (SourceUrl+Title+Price)
-        // en vez de solo SourceUrl/Title.
         var seenKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         for (int i = 0; i < chunks.Count; i++)
         {
+            // ── CHEQUEO STOP entre chunks de Bedrock ─────────────────
+            if (await IsBotStoppingAsync(bot.Id))
+            {
+                await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                    $"⚠️ Stop signal received between Bedrock chunks ({i}/{chunks.Count}).");
+                break;
+            }
+
             var preview = chunks[i].Length > 200 ? chunks[i][..200] + "…" : chunks[i];
             await _botLogService.LogInfoAsync(bot.Id, bot.Name,
                 $"🤖 Processing chunk {i + 1}/{chunks.Count} ({chunks[i].Length:N0} chars)...\nPreview: {preview}");
@@ -922,7 +979,6 @@ public class ScraperService : IScraperService
             int added = 0;
             foreach (var prop in chunkProperties)
             {
-                // FIX: Key compuesta para dedup en memoria
                 var key = $"{prop.SourceUrl ?? ""}|{prop.Title ?? ""}|{prop.Price}";
                 if (seenKeys.Add(key))
                 {
@@ -938,7 +994,6 @@ public class ScraperService : IScraperService
         return allProperties;
     }
 
-    // FIX: Retry con backoff exponencial para Bedrock
     private async Task<List<Property>> ProcessChunkWithBedrock(string chunkText, Bot bot, string modelId)
     {
         var prompt = $@"Analiza el siguiente texto extraído de una página web de bienes raíces chilena.
@@ -993,21 +1048,18 @@ TEXTO:
 
         var request = new ConverseRequest
         {
-            ModelId = modelId,
+            ModelId  = modelId,
             Messages = new List<Message>
             {
                 new Message
                 {
-                    Role = "user",
-                    Content = new List<ContentBlock>
-                    {
-                        new ContentBlock { Text = prompt }
-                    }
+                    Role    = "user",
+                    Content = new List<ContentBlock> { new ContentBlock { Text = prompt } }
                 }
             },
             InferenceConfig = new InferenceConfiguration
             {
-                MaxTokens = 8000,
+                MaxTokens   = 8000,
                 Temperature = 0.1f
             }
         };
@@ -1018,8 +1070,8 @@ TEXTO:
         {
             try
             {
-                var response = await _bedrockClient.ConverseAsync(request);
-                var stopReason = response?.StopReason ?? "unknown";
+                var response     = await _bedrockClient.ConverseAsync(request);
+                var stopReason   = response?.StopReason ?? "unknown";
                 var contentBlocks = response?.Output?.Message?.Content;
 
                 var jsonResponse = contentBlocks?
@@ -1071,7 +1123,6 @@ TEXTO:
             }
             catch (Exception ex) when (attempt < maxRetries)
             {
-                // FIX: Retry con backoff exponencial para errores transitorios
                 var delay = 2000 * (attempt + 1);
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
                     $"⚠️ Bedrock API error (attempt {attempt + 1}/{maxRetries + 1}): {ex.Message}. Retrying in {delay}ms...");
@@ -1085,40 +1136,39 @@ TEXTO:
             }
         }
 
-        // No debería llegar aquí, pero por seguridad
         return new List<Property>();
     }
 
-    private static bool IsMockScrapingEnabled()
-    {
-        return string.Equals(
+    private static bool IsMockScrapingEnabled() =>
+        string.Equals(
             Environment.GetEnvironmentVariable("SCRAPER_MOCK_MODE"),
             "true",
             StringComparison.OrdinalIgnoreCase);
-    }
 
-    private static List<Property> BuildMockProperties(Bot bot)
-    {
-        return new List<Property>
+    private static List<Property> BuildMockProperties(Bot bot) =>
+        new List<Property>
         {
             new Property
             {
-                Title = $"Mock property for {bot.Name}",
-                SourceUrl = bot.Url,
-                Price = 100000000,
-                Currency = "CLP",
-                Address = "Av. Providencia 123",
-                City = "Santiago",
-                Region = "Metropolitana",
+                Title        = $"Mock property for {bot.Name}",
+                SourceUrl    = bot.Url,
+                Price        = 100000000,
+                Currency     = "CLP",
+                Address      = "Av. Providencia 123",
+                City         = "Santiago",
+                Region       = "Metropolitana",
                 Neighborhood = "Providencia",
-                Bedrooms = 3,
-                Bathrooms = 2,
-                Area = 85,
+                Bedrooms     = 3,
+                Bathrooms    = 2,
+                Area         = 85,
                 PropertyType = "casa",
-                Description = "Mock data generated for testing."
+                Description  = "Mock data generated for testing."
             }
         };
-    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // DTOs internos para deserializar respuesta de Bedrock
+    // ══════════════════════════════════════════════════════════════════════
 
     private class BedrockResponse
     {
@@ -1127,18 +1177,18 @@ TEXTO:
 
     private class PropertyDto
     {
-        public string? Title { get; set; }
-        public string? SourceUrl { get; set; }
-        public decimal? Price { get; set; }
-        public string? Currency { get; set; }
-        public string? Address { get; set; }
-        public string? City { get; set; }
-        public string? Region { get; set; }
-        public string? Neighborhood { get; set; }
-        public int? Bedrooms { get; set; }
-        public int? Bathrooms { get; set; }
-        public decimal? Area { get; set; }
-        public string? PropertyType { get; set; }
-        public string? Description { get; set; }
+        public string?  Title        { get; set; }
+        public string?  SourceUrl    { get; set; }
+        public decimal? Price        { get; set; }
+        public string?  Currency     { get; set; }
+        public string?  Address      { get; set; }
+        public string?  City         { get; set; }
+        public string?  Region       { get; set; }
+        public string?  Neighborhood { get; set; }
+        public int?     Bedrooms     { get; set; }
+        public int?     Bathrooms    { get; set; }
+        public decimal? Area         { get; set; }
+        public string?  PropertyType { get; set; }
+        public string?  Description  { get; set; }
     }
 }

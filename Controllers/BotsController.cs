@@ -30,10 +30,7 @@ public class BotsController : ControllerBase
     public async Task<ActionResult<Bot>> GetBot(int id)
     {
         var bot = await _context.Bots.FindAsync(id);
-
-        if (bot == null)
-            return NotFound();
-
+        if (bot == null) return NotFound();
         return Ok(bot);
     }
 
@@ -44,7 +41,6 @@ public class BotsController : ControllerBase
         bot.CreatedAt = DateTime.UtcNow;
         _context.Bots.Add(bot);
         await _context.SaveChangesAsync();
-
         return CreatedAtAction(nameof(GetBot), new { id = bot.Id }, bot);
     }
 
@@ -52,8 +48,7 @@ public class BotsController : ControllerBase
     [HttpPut("{id}")]
     public async Task<IActionResult> UpdateBot(int id, Bot bot)
     {
-        if (id != bot.Id)
-            return BadRequest();
+        if (id != bot.Id) return BadRequest();
 
         bot.UpdatedAt = DateTime.UtcNow;
         _context.Entry(bot).State = EntityState.Modified;
@@ -64,8 +59,7 @@ public class BotsController : ControllerBase
         }
         catch (DbUpdateConcurrencyException)
         {
-            if (!await BotExists(id))
-                return NotFound();
+            if (!await BotExists(id)) return NotFound();
             throw;
         }
 
@@ -77,13 +71,16 @@ public class BotsController : ControllerBase
     public async Task<IActionResult> DeleteBot(int id)
     {
         var bot = await _context.Bots.FindAsync(id);
-        if (bot == null)
-            return NotFound();
+        if (bot == null) return NotFound();
+
+        // No se puede eliminar un bot que está corriendo
+        if (bot.Status == "running")
+            return BadRequest(new { message = "No se puede eliminar un bot que está en ejecución. Deténlo primero." });
 
         _context.Bots.Remove(bot);
         await _context.SaveChangesAsync();
 
-        return NoContent();
+        return Ok(new { message = $"Bot '{bot.Name}' eliminado exitosamente.", botId = id });
     }
 
     // POST: api/bots/5/run
@@ -91,25 +88,72 @@ public class BotsController : ControllerBase
     public async Task<IActionResult> RunBot(int id, [FromServices] IBackgroundJobClient backgroundJobClient)
     {
         var bot = await _context.Bots.FindAsync(id);
-        
-        if (bot == null)
-            return NotFound(new { message = "Bot not found" });
-        
-        if (!bot.IsActive)
-            return BadRequest(new { message = "Bot is not active" });
 
-        // Encolar el job en Hangfire
+        if (bot == null)
+            return NotFound(new { message = "Bot no encontrado." });
+
+        if (!bot.IsActive)
+            return BadRequest(new { message = "El bot no está activo." });
+
+        if (bot.Status == "running")
+            return BadRequest(new { message = "El bot ya está en ejecución." });
+
         backgroundJobClient.Enqueue<ScrapingJob>(job => job.ExecuteBotAsync(id));
-        
-        return Ok(new { 
-            message = "Bot execution queued successfully",
+
+        return Ok(new
+        {
+            message = "Bot encolado para ejecución exitosamente.",
             botId = id,
             botName = bot.Name
         });
     }
 
-    private async Task<bool> BotExists(int id)
+    // POST: api/bots/5/stop
+    // Marca el bot para detención. El ScraperService comprueba este flag
+    // en cada iteración y detiene el proceso limpiamente.
+    [HttpPost("{id}/stop")]
+    public async Task<IActionResult> StopBot(int id)
     {
-        return await _context.Bots.AnyAsync(e => e.Id == id);
+        var bot = await _context.Bots.FindAsync(id);
+
+        if (bot == null)
+            return NotFound(new { message = "Bot no encontrado." });
+
+        if (bot.Status != "running")
+            return BadRequest(new { message = $"El bot no está en ejecución (estado actual: {bot.Status})." });
+
+        // Marcar como "stopping" para que ScraperService lo detecte y detenga el loop
+        bot.Status = "stopping";
+        bot.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = $"Señal de detención enviada al bot '{bot.Name}'. Se detendrá al completar la iteración actual.",
+            botId = id,
+            botName = bot.Name
+        });
     }
+
+    // POST: api/bots/5/toggle  (activar / desactivar)
+    [HttpPost("{id}/toggle")]
+    public async Task<IActionResult> ToggleBot(int id)
+    {
+        var bot = await _context.Bots.FindAsync(id);
+        if (bot == null) return NotFound();
+
+        bot.IsActive = !bot.IsActive;
+        bot.UpdatedAt = DateTime.UtcNow;
+        await _context.SaveChangesAsync();
+
+        return Ok(new
+        {
+            message = bot.IsActive ? $"Bot '{bot.Name}' activado." : $"Bot '{bot.Name}' desactivado.",
+            botId = id,
+            isActive = bot.IsActive
+        });
+    }
+
+    private async Task<bool> BotExists(int id) =>
+        await _context.Bots.AnyAsync(e => e.Id == id);
 }
