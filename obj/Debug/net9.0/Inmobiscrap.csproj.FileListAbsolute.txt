@@ -371,6 +371,7 @@ C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\I
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Inmobiscrap.pdb
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\AWSSDK.BedrockRuntime.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\AWSSDK.Core.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\BCrypt.Net-Next.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Dapper.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\DotNetEnv.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Hangfire.AspNetCore.dll
@@ -380,6 +381,7 @@ C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\H
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Hangfire.SqlServer.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\HtmlAgilityPack.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Humanizer.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.AspNetCore.Authentication.JwtBearer.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.AspNetCore.OpenApi.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.Bcl.AsyncInterfaces.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.Build.Locator.dll
@@ -394,6 +396,12 @@ C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\M
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.EntityFrameworkCore.Design.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.EntityFrameworkCore.Relational.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.Extensions.DependencyModel.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.IdentityModel.Abstractions.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.IdentityModel.JsonWebTokens.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.IdentityModel.Logging.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.IdentityModel.Protocols.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.IdentityModel.Protocols.OpenIdConnect.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.IdentityModel.Tokens.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.OpenApi.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Microsoft.Playwright.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Mono.TextTemplating.dll
@@ -410,6 +418,7 @@ C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\S
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\System.Composition.Hosting.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\System.Composition.Runtime.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\System.Composition.TypedParts.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\System.IdentityModel.Tokens.Jwt.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\cs\Microsoft.CodeAnalysis.resources.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\de\Microsoft.CodeAnalysis.resources.dll
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\es\Microsoft.CodeAnalysis.resources.dll

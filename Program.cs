@@ -1,159 +1,193 @@
+using System.Text;
 using Inmobiscrap.Data;
 using Inmobiscrap.Services;
 using Inmobiscrap.Jobs;
-using Inmobiscrap.Hubs; // ← AGREGAR ESTO
+using Inmobiscrap.Hubs;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 using Hangfire;
 using Hangfire.PostgreSql;
 using Amazon.BedrockRuntime;
 using Amazon.Runtime;
 using DotNetEnv;
 
-// Cargar variables de entorno desde .env
 Env.Load();
 
 var builder = WebApplication.CreateBuilder(args);
 
-// ⭐ CONFIGURAR CORS - IMPORTANTE PARA EL FRONTEND
+// ── CORS ──────────────────────────────────────────────────────────────────────
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowLocalhost",
-        builder =>
-        {
-            builder.WithOrigins(
-                    "http://localhost:3000",  // Next.js dev server
-                    "http://localhost:3001",  // Por si usas otro puerto
-                    "http://127.0.0.1:3000",
-                    "http://127.0.0.1:3001"
-                )
-                .AllowAnyHeader()
-                .AllowAnyMethod()
-                .AllowCredentials();
-        });
-    
-    // Política más permisiva para desarrollo (usa con cuidado)
-    options.AddPolicy("AllowAll",
-        builder =>
-        {
-            builder.AllowAnyOrigin()
-                   .AllowAnyHeader()
-                   .AllowAnyMethod();
-        });
+    options.AddPolicy("AllowLocalhost", policy =>
+    {
+        policy.WithOrigins(
+                "http://localhost:3000",
+                "http://localhost:3001",
+                "http://127.0.0.1:3000",
+                "http://127.0.0.1:3001")
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials();
+    });
 });
 
-// Configurar DbContext con PostgreSQL
-var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING") 
+// ── DATABASE ─────────────────────────────────────────────────────────────────
+var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING")
     ?? builder.Configuration.GetConnectionString("DefaultConnection");
 
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(connectionString));
 
-// Configurar AWS Bedrock Client usando variables de entorno
+// ── JWT AUTHENTICATION ────────────────────────────────────────────────────────
+var jwtSecret = Environment.GetEnvironmentVariable("JWT_SECRET")
+    ?? builder.Configuration["Jwt:Secret"]
+    ?? throw new InvalidOperationException("JWT_SECRET must be set in environment variables.");
+
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    options.DefaultChallengeScheme    = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey         = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret)),
+        ValidateIssuer           = true,
+        ValidIssuer              = builder.Configuration["Jwt:Issuer"] ?? "inmobiscrap",
+        ValidateAudience         = true,
+        ValidAudience            = builder.Configuration["Jwt:Audience"] ?? "inmobiscrap",
+        ValidateLifetime         = true,
+        ClockSkew                = TimeSpan.Zero,
+    };
+
+    // Soporte para SignalR: leer token del query string
+    options.Events = new JwtBearerEvents
+    {
+        OnMessageReceived = context =>
+        {
+            var accessToken = context.Request.Query["access_token"];
+            var path = context.HttpContext.Request.Path;
+            if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
+                context.Token = accessToken;
+            return Task.CompletedTask;
+        }
+    };
+});
+
+builder.Services.AddAuthorization();
+
+// ── AWS BEDROCK ───────────────────────────────────────────────────────────────
 var awsAccessKey = Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID");
 var awsSecretKey = Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY");
-var awsRegion = Environment.GetEnvironmentVariable("AWS_REGION") ?? "sa-east-1";
+var awsRegion    = Environment.GetEnvironmentVariable("AWS_REGION") ?? "sa-east-1";
 
 if (string.IsNullOrEmpty(awsAccessKey) || string.IsNullOrEmpty(awsSecretKey))
-{
-    throw new InvalidOperationException(
-        "AWS credentials not found. Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables.");
-}
+    throw new InvalidOperationException("AWS credentials not found.");
 
 var credentials = new BasicAWSCredentials(awsAccessKey, awsSecretKey);
 builder.Services.AddSingleton<IAmazonBedrockRuntime>(
     new AmazonBedrockRuntimeClient(credentials, Amazon.RegionEndpoint.GetBySystemName(awsRegion)));
 
-// Configurar Hangfire
-builder.Services.AddHangfire(configuration => configuration
+// ── HANGFIRE ──────────────────────────────────────────────────────────────────
+builder.Services.AddHangfire(cfg => cfg
     .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
     .UseSimpleAssemblyNameTypeSerializer()
     .UseRecommendedSerializerSettings()
-    .UsePostgreSqlStorage(options => 
-        options.UseNpgsqlConnection(connectionString)));
+    .UsePostgreSqlStorage(opts => opts.UseNpgsqlConnection(connectionString)));
 
 builder.Services.AddHangfireServer();
 
-// Agregar HttpClient
+// ── SERVICES ──────────────────────────────────────────────────────────────────
 builder.Services.AddHttpClient();
-
-// ⭐ AGREGAR SIGNALR (ESTO FALTABA)
 builder.Services.AddSignalR();
-
-// Registrar servicios
-builder.Services.AddSingleton<IBotLogBuffer, BotLogBuffer>(); // Singleton: persiste historial en memoria
+builder.Services.AddSingleton<IBotLogBuffer, BotLogBuffer>();
 builder.Services.AddScoped<IScraperService, ScraperService>();
-builder.Services.AddScoped<IBotLogService, BotLogService>(); // ← ESTO FALTABA
+builder.Services.AddScoped<IBotLogService, BotLogService>();
 builder.Services.AddScoped<ScrapingJob>();
 
-// Add services to the container.
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+builder.Services.AddSwaggerGen(c =>
+{
+    // Configurar Swagger para aceptar JWT
+    c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    {
+        In          = Microsoft.OpenApi.Models.ParameterLocation.Header,
+        Description = "Ingresa: Bearer {token}",
+        Name        = "Authorization",
+        Type        = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+    });
+    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+    {
+        {
+            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            {
+                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                {
+                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Id   = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 
 var app = builder.Build();
 
-// ⭐ APLICAR MIGRACIONES AUTOMÁTICAMENTE (Opcional pero útil)
+// ── AUTO-MIGRATE ──────────────────────────────────────────────────────────────
 using (var scope = app.Services.CreateScope())
 {
     try
     {
-        var dbContext = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        
-        // Verificar si hay migraciones pendientes
-        if (dbContext.Database.GetPendingMigrations().Any())
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        if (db.Database.GetPendingMigrations().Any())
         {
-            Console.WriteLine("Aplicando migraciones pendientes...");
-            dbContext.Database.Migrate();
-            Console.WriteLine("Migraciones aplicadas exitosamente.");
-        }
-        else
-        {
-            Console.WriteLine("No hay migraciones pendientes.");
+            Console.WriteLine("Applying pending migrations...");
+            db.Database.Migrate();
+            Console.WriteLine("Migrations applied.");
         }
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error al aplicar migraciones: {ex.Message}");
-        // En desarrollo podrías querer que falle, en producción tal vez solo log
+        Console.WriteLine($"Migration error: {ex.Message}");
     }
 }
 
-// Configure the HTTP request pipeline.
+// ── PIPELINE ──────────────────────────────────────────────────────────────────
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI();
-    
-    // Dashboard de Hangfire (solo en desarrollo)
     app.UseHangfireDashboard("/hangfire");
 }
 
-// ⭐ USAR CORS - MUY IMPORTANTE QUE VAYA ANTES DE Authorization
-app.UseCors("AllowLocalhost"); // Usa "AllowAll" para desarrollo si tienes problemas
-
+app.UseCors("AllowLocalhost");
 app.UseHttpsRedirection();
-app.UseAuthorization();
-app.MapControllers();
 
-// ⭐ MAPEAR HUB DE SIGNALR (ESTO FALTABA)
+// ORDEN IMPORTANTE: Authentication ANTES de Authorization
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
 app.MapHub<BotLogHub>("/hubs/botlogs");
 
-// Programar jobs DESPUÉS de que app esté construida
+// ── RECURRING JOBS ────────────────────────────────────────────────────────────
 using (var scope = app.Services.CreateScope())
 {
     var recurringJobManager = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
-    
     recurringJobManager.AddOrUpdate<ScrapingJob>(
         "execute-all-bots",
         job => job.ExecuteAllActiveBotsAsync(),
         Cron.Hourly());
 }
 
-// ⭐ Log para confirmar en qué puerto está corriendo
 var port = Environment.GetEnvironmentVariable("API_PORT") ?? "5000";
 Console.WriteLine($"🚀 API corriendo en http://localhost:{port}");
-Console.WriteLine($"📊 Swagger UI disponible en http://localhost:{port}/swagger");
-Console.WriteLine($"🔧 Hangfire Dashboard en http://localhost:{port}/hangfire");
-Console.WriteLine($"📡 SignalR Hub disponible en ws://localhost:{port}/hubs/botlogs");
+Console.WriteLine($"📊 Swagger UI: http://localhost:{port}/swagger");
+Console.WriteLine($"🔐 Auth endpoints: /api/auth/register | /api/auth/login | /api/auth/google");
 
 app.Run();

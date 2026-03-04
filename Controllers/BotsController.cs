@@ -4,11 +4,13 @@ using Hangfire;
 using Inmobiscrap.Data;
 using Inmobiscrap.Models;
 using Inmobiscrap.Jobs;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Inmobiscrap.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
 public class BotsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;

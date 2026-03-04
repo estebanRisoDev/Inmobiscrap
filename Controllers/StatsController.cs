@@ -1,11 +1,13 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Inmobiscrap.Data;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Inmobiscrap.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
 public class StatsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;

@@ -2,11 +2,13 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Inmobiscrap.Data;
 using Inmobiscrap.Models;
+using Microsoft.AspNetCore.Authorization;
 
 namespace Inmobiscrap.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+[Authorize]
 public class PropertiesController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
