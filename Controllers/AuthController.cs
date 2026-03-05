@@ -18,7 +18,7 @@ public record RegisterRequest(string Name, string Email, string Password);
 public record LoginRequest(string Email, string Password);
 public record GoogleAuthRequest(string IdToken);
 public record AuthResponse(string Token, UserDto User);
-public record UserDto(int Id, string Name, string Email, string? AvatarUrl, string Role);
+public record UserDto(int Id, string Name, string Email, string? AvatarUrl, string Role, string Plan, int Credits);
 
 // ── Controller ───────────────────────────────────────────────────
 
@@ -43,6 +43,18 @@ public class AuthController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>
+    /// Determina si un email debe recibir rol admin automáticamente.
+    /// Configurado via SUPERADMIN_EMAIL en .env (puede ser CSV: "a@b.com,c@d.com")
+    /// </summary>
+    private bool IsSuperAdminEmail(string email)
+    {
+        var superAdminEmails = Environment.GetEnvironmentVariable("SUPERADMIN_EMAIL") ?? "";
+        return superAdminEmails
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(e => e.Equals(email, StringComparison.OrdinalIgnoreCase));
+    }
+
     // ── POST /api/auth/register ───────────────────────────────────
     [HttpPost("register")]
     public async Task<ActionResult<AuthResponse>> Register([FromBody] RegisterRequest req)
@@ -58,11 +70,16 @@ public class AuthController : ControllerBase
         if (await _context.Users.AnyAsync(u => u.Email == emailLower))
             return Conflict(new { message = "Ya existe una cuenta con ese email." });
 
+        var isAdmin = IsSuperAdminEmail(emailLower);
+
         var user = new User
         {
             Name         = req.Name.Trim(),
             Email        = emailLower,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password),
+            Plan         = isAdmin ? "pro" : "base",
+            Credits      = isAdmin ? 0 : 50,
+            Role         = isAdmin ? "admin" : "user",
             CreatedAt    = DateTime.UtcNow,
             LastLogin    = DateTime.UtcNow,
         };
@@ -70,8 +87,10 @@ public class AuthController : ControllerBase
         _context.Users.Add(user);
         await _context.SaveChangesAsync();
 
-        var token = GenerateJwt(user);
-        return Ok(new AuthResponse(token, ToDto(user)));
+        if (isAdmin)
+            _logger.LogInformation("🔑 SuperAdmin registered: {Email}", emailLower);
+
+        return Ok(new AuthResponse(GenerateJwt(user), ToDto(user)));
     }
 
     // ── POST /api/auth/login ──────────────────────────────────────
@@ -93,16 +112,21 @@ public class AuthController : ControllerBase
         if (!user.IsActive)
             return Unauthorized(new { message = "Tu cuenta está desactivada." });
 
+        // Auto-promover si el email está en SUPERADMIN_EMAIL y aún no es admin
+        if (IsSuperAdminEmail(emailLower) && user.Role != "admin")
+        {
+            user.Role = "admin";
+            user.Plan = "pro";
+            _logger.LogInformation("🔑 Existing user promoted to admin: {Email}", emailLower);
+        }
+
         user.LastLogin = DateTime.UtcNow;
         await _context.SaveChangesAsync();
 
-        var token = GenerateJwt(user);
-        return Ok(new AuthResponse(token, ToDto(user)));
+        return Ok(new AuthResponse(GenerateJwt(user), ToDto(user)));
     }
 
     // ── POST /api/auth/google ─────────────────────────────────────
-    // Recibe el id_token de Google (credential del botón Google Identity)
-    // y lo valida consultando la endpoint de tokeninfo de Google.
     [HttpPost("google")]
     public async Task<ActionResult<AuthResponse>> GoogleAuth([FromBody] GoogleAuthRequest req)
     {
@@ -123,7 +147,6 @@ public class AuthController : ControllerBase
         if (tokenInfo == null)
             return Unauthorized(new { message = "No se pudo verificar el token de Google." });
 
-        // Verificar que el audience coincide con tu Google Client ID
         var expectedClientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID")
             ?? _configuration["Google:ClientId"];
 
@@ -131,20 +154,23 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Token de Google no pertenece a esta aplicación." });
 
         var emailLower = tokenInfo.Email?.ToLower().Trim() ?? "";
+        var isAdmin = IsSuperAdminEmail(emailLower);
 
-        // Buscar por GoogleId primero, luego por email
         var user = await _context.Users.FirstOrDefaultAsync(u => u.GoogleId == tokenInfo.Sub)
                 ?? await _context.Users.FirstOrDefaultAsync(u => u.Email == emailLower);
 
         if (user == null)
         {
-            // Crear nuevo usuario via Google
+            // Nuevo usuario vía Google
             user = new User
             {
                 Name      = tokenInfo.Name ?? tokenInfo.Email ?? "Usuario",
                 Email     = emailLower,
                 GoogleId  = tokenInfo.Sub,
                 AvatarUrl = tokenInfo.Picture,
+                Plan      = isAdmin ? "pro" : "base",
+                Credits   = isAdmin ? 0 : 50,
+                Role      = isAdmin ? "admin" : "user",
                 CreatedAt = DateTime.UtcNow,
                 LastLogin = DateTime.UtcNow,
             };
@@ -152,16 +178,20 @@ public class AuthController : ControllerBase
         }
         else
         {
-            // Actualizar perfil de Google si ya existe
             user.GoogleId  ??= tokenInfo.Sub;
             user.AvatarUrl ??= tokenInfo.Picture;
             user.LastLogin   = DateTime.UtcNow;
+
+            // Auto-promover si está en SUPERADMIN_EMAIL
+            if (isAdmin && user.Role != "admin")
+            {
+                user.Role = "admin";
+                user.Plan = "pro";
+            }
         }
 
         await _context.SaveChangesAsync();
-
-        var token = GenerateJwt(user);
-        return Ok(new AuthResponse(token, ToDto(user)));
+        return Ok(new AuthResponse(GenerateJwt(user), ToDto(user)));
     }
 
     // ── GET /api/auth/me ──────────────────────────────────────────
@@ -178,16 +208,36 @@ public class AuthController : ControllerBase
         return Ok(ToDto(user));
     }
 
+    // ── GET /api/auth/credits ─────────────────────────────────────
+    [HttpGet("credits")]
+    [Authorize]
+    public async Task<IActionResult> GetCredits()
+    {
+        var userId = GetCurrentUserId();
+        if (userId == null) return Unauthorized();
+
+        var user = await _context.Users.FindAsync(userId.Value);
+        if (user == null) return Unauthorized();
+
+        return Ok(new
+        {
+            plan = user.Plan,
+            credits = user.Credits,
+            unlimited = user.Plan == "pro",
+            role = user.Role,
+        });
+    }
+
     // ── Helpers ───────────────────────────────────────────────────
 
     private string GenerateJwt(User user)
     {
-        var jwtKey     = Environment.GetEnvironmentVariable("JWT_SECRET")
+        var jwtKey = Environment.GetEnvironmentVariable("JWT_SECRET")
             ?? _configuration["Jwt:Secret"]
             ?? throw new InvalidOperationException("JWT_SECRET not configured.");
 
-        var key        = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
-        var creds      = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+        var key   = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey));
+        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
         var expiresDays = int.TryParse(_configuration["Jwt:ExpireDays"], out var d) ? d : 7;
 
         var claims = new[]
@@ -196,6 +246,7 @@ public class AuthController : ControllerBase
             new Claim(ClaimTypes.Email, user.Email),
             new Claim(ClaimTypes.Name, user.Name),
             new Claim(ClaimTypes.Role, user.Role),
+            new Claim("plan", user.Plan),
         };
 
         var token = new JwtSecurityToken(
@@ -229,15 +280,14 @@ public class AuthController : ControllerBase
     }
 
     private static UserDto ToDto(User u) =>
-        new(u.Id, u.Name, u.Email, u.AvatarUrl, u.Role);
+        new(u.Id, u.Name, u.Email, u.AvatarUrl, u.Role, u.Plan, u.Credits);
 
-    // ── Google Token Info DTO ─────────────────────────────────────
     private class GoogleTokenInfo
     {
-        public string? Sub     { get; set; } // Google user ID
+        public string? Sub     { get; set; }
         public string? Email   { get; set; }
         public string? Name    { get; set; }
         public string? Picture { get; set; }
-        public string? Aud     { get; set; } // Audience (your client ID)
+        public string? Aud     { get; set; }
     }
 }

@@ -4,6 +4,10 @@ public class Bot
 {
     public int Id { get; set; }
 
+    // ── Relación con usuario ──────────────────────────────────────────────────
+    public int UserId { get; set; }
+    public User User { get; set; } = null!;
+
     // Identificación
     public string Name   { get; set; } = string.Empty;
     public string Source { get; set; } = string.Empty;
@@ -12,10 +16,9 @@ public class Bot
     public string Url      { get; set; } = string.Empty;
     public bool   IsActive { get; set; } = true;
 
-    // ── NUEVO: Programación ───────────────────────────────────────────────────
-    public bool    ScheduleEnabled { get; set; } = false;   // switch on/off
-    public string? CronExpression  { get; set; }             // ej: "0 6 * * *"
-    // ─────────────────────────────────────────────────────────────────────────
+    // Programación
+    public bool    ScheduleEnabled { get; set; } = false;
+    public string? CronExpression  { get; set; }
 
     // Estado de ejecución
     public DateTime? LastRun  { get; set; }

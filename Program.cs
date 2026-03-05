@@ -189,6 +189,47 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
+
+// ── SUPERADMIN SEED ───────────────────────────────────────────────────────────
+// Si SUPERADMIN_EMAIL está configurado, promueve automáticamente al usuario
+// existente (si ya se registró) o lo marca para auto-promoción al login.
+using (var scope = app.Services.CreateScope())
+{
+    try
+    {
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var superAdminEmails = Environment.GetEnvironmentVariable("SUPERADMIN_EMAIL") ?? "";
+
+        var emails = superAdminEmails
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(e => e.ToLower())
+            .ToList();
+
+        if (emails.Any())
+        {
+            var usersToPromote = await db.Users
+                .Where(u => emails.Contains(u.Email) && u.Role != "admin")
+                .ToListAsync();
+
+            foreach (var user in usersToPromote)
+            {
+                user.Role = "admin";
+                user.Plan = "pro";
+                Console.WriteLine($"🔑 Promoted existing user to admin: {user.Email}");
+            }
+
+            if (usersToPromote.Any())
+                await db.SaveChangesAsync();
+
+            Console.WriteLine($"✅ SuperAdmin emails configured: {string.Join(", ", emails)}");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"SuperAdmin seed error: {ex.Message}");
+    }
+}
+
 // ── STARTUP HANGFIRE SYNC ─────────────────────────────────────────────────────
 // Sincroniza los jobs de Hangfire con el estado real de la BD.
 // Necesario porque Hangfire guarda los jobs en su propia tabla de PostgreSQL,

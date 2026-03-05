@@ -50,12 +50,16 @@ public class ApplicationDbContext : DbContext
             entity.Property(b => b.TotalScraped).HasDefaultValue(0);
             entity.Property(b => b.LastRunCount).HasDefaultValue(0);
             entity.Property(b => b.CreatedAt).HasDefaultValueSql("NOW()");
-
-            // ── NUEVO ──────────────────────────────────────────────────────
             entity.Property(b => b.ScheduleEnabled).HasDefaultValue(false);
             entity.Property(b => b.CronExpression).HasMaxLength(100);
-            // ──────────────────────────────────────────────────────────────
 
+            // FK → User
+            entity.HasOne(b => b.User)
+                  .WithMany(u => u.Bots)
+                  .HasForeignKey(b => b.UserId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasIndex(b => b.UserId).HasDatabaseName("IX_Bots_UserId");
             entity.HasIndex(b => b.Source).HasDatabaseName("IX_Bots_Source");
             entity.HasIndex(b => b.IsActive).HasDatabaseName("IX_Bots_IsActive");
             entity.HasIndex(b => b.Status).HasDatabaseName("IX_Bots_Status");
@@ -72,6 +76,10 @@ public class ApplicationDbContext : DbContext
             entity.Property(u => u.Role).HasMaxLength(20).HasDefaultValue("user");
             entity.Property(u => u.IsActive).HasDefaultValue(true);
             entity.Property(u => u.CreatedAt).HasDefaultValueSql("NOW()");
+
+            // Plan y créditos
+            entity.Property(u => u.Plan).HasMaxLength(20).HasDefaultValue("base");
+            entity.Property(u => u.Credits).HasDefaultValue(50);
 
             entity.HasIndex(u => u.Email).IsUnique().HasDatabaseName("IX_Users_Email");
             entity.HasIndex(u => u.GoogleId).HasDatabaseName("IX_Users_GoogleId");
