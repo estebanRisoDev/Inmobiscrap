@@ -12,7 +12,7 @@ public class ApplicationDbContext : DbContext
 
     public DbSet<Property> Properties { get; set; } = null!;
     public DbSet<Bot>      Bots       { get; set; } = null!;
-    public DbSet<User>     Users      { get; set; } = null!;   // ← NUEVO
+    public DbSet<User>     Users      { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -51,6 +51,11 @@ public class ApplicationDbContext : DbContext
             entity.Property(b => b.LastRunCount).HasDefaultValue(0);
             entity.Property(b => b.CreatedAt).HasDefaultValueSql("NOW()");
 
+            // ── NUEVO ──────────────────────────────────────────────────────
+            entity.Property(b => b.ScheduleEnabled).HasDefaultValue(false);
+            entity.Property(b => b.CronExpression).HasMaxLength(100);
+            // ──────────────────────────────────────────────────────────────
+
             entity.HasIndex(b => b.Source).HasDatabaseName("IX_Bots_Source");
             entity.HasIndex(b => b.IsActive).HasDatabaseName("IX_Bots_IsActive");
             entity.HasIndex(b => b.Status).HasDatabaseName("IX_Bots_Status");
@@ -68,7 +73,6 @@ public class ApplicationDbContext : DbContext
             entity.Property(u => u.IsActive).HasDefaultValue(true);
             entity.Property(u => u.CreatedAt).HasDefaultValueSql("NOW()");
 
-            // Email único
             entity.HasIndex(u => u.Email).IsUnique().HasDatabaseName("IX_Users_Email");
             entity.HasIndex(u => u.GoogleId).HasDatabaseName("IX_Users_GoogleId");
         });

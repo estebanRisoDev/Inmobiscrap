@@ -63,7 +63,6 @@ builder.Services.AddAuthentication(options =>
         ClockSkew                = TimeSpan.Zero,
     };
 
-    // Soporte para SignalR: leer token del query string
     options.Events = new JwtBearerEvents
     {
         OnMessageReceived = context =>
@@ -112,7 +111,6 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
-    // Configurar Swagger para aceptar JWT
     c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
     {
         In          = Microsoft.OpenApi.Models.ParameterLocation.Header,
@@ -148,12 +146,93 @@ using (var scope = app.Services.CreateScope())
         {
             Console.WriteLine("Applying pending migrations...");
             db.Database.Migrate();
-            Console.WriteLine("Migrations applied.");
+            Console.WriteLine("✅ Migrations applied.");
         }
     }
     catch (Exception ex)
     {
         Console.WriteLine($"Migration error: {ex.Message}");
+    }
+}
+
+// ── STARTUP BOT CLEANUP ───────────────────────────────────────────────────────
+// Resetea bots zombie que quedaron en running/stopping por un Docker restart
+using (var scope = app.Services.CreateScope())
+{
+    try
+    {
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+        var stuckBots = await db.Bots
+            .Where(b => b.Status == "running" || b.Status == "stopping")
+            .ToListAsync();
+
+        if (stuckBots.Any())
+        {
+            foreach (var bot in stuckBots)
+            {
+                bot.Status    = "idle";
+                bot.UpdatedAt = DateTime.UtcNow;
+                bot.LastError = "Estado reseteado: proceso interrumpido por reinicio del servidor.";
+            }
+            await db.SaveChangesAsync();
+            Console.WriteLine($"⚠️  Reset {stuckBots.Count} bot(s) zombie → idle.");
+        }
+        else
+        {
+            Console.WriteLine("✅ No hay bots zombie al arrancar.");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Startup bot cleanup error: {ex.Message}");
+    }
+}
+
+// ── STARTUP HANGFIRE SYNC ─────────────────────────────────────────────────────
+// Sincroniza los jobs de Hangfire con el estado real de la BD.
+// Necesario porque Hangfire guarda los jobs en su propia tabla de PostgreSQL,
+// pero si un bot fue modificado mientras el servidor estaba caído, pueden
+// quedar desincronizados. Este bloque deja Hangfire como fuente de verdad
+// secundaria, siendo la BD la fuente primaria.
+using (var scope = app.Services.CreateScope())
+{
+    try
+    {
+        var db              = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var recurringJobs   = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
+
+        var allBots = await db.Bots.ToListAsync();
+
+        int registered = 0;
+        int removed    = 0;
+
+        foreach (var bot in allBots)
+        {
+            var jobId = $"bot-schedule-{bot.Id}";
+
+            if (bot.IsActive && bot.ScheduleEnabled && !string.IsNullOrWhiteSpace(bot.CronExpression))
+            {
+                // Registrar o actualizar job de Hangfire para este bot
+                recurringJobs.AddOrUpdate<ScrapingJob>(
+                    jobId,
+                    job => job.ExecuteBotAsync(bot.Id),
+                    bot.CronExpression);
+                registered++;
+            }
+            else
+            {
+                // Eliminar job si el bot ya no debe estar programado
+                recurringJobs.RemoveIfExists(jobId);
+                removed++;
+            }
+        }
+
+        Console.WriteLine($"✅ Hangfire sync: {registered} job(s) registrado(s), {removed} eliminado(s).");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Hangfire sync error: {ex.Message}");
     }
 }
 
@@ -175,11 +254,12 @@ app.UseAuthorization();
 app.MapControllers();
 app.MapHub<BotLogHub>("/hubs/botlogs");
 
-// ── RECURRING JOBS ────────────────────────────────────────────────────────────
+// ── RECURRING JOB GLOBAL ──────────────────────────────────────────────────────
+// Job global para bots sin schedule propio (idle/error sin cron configurado)
 using (var scope = app.Services.CreateScope())
 {
-    var recurringJobManager = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
-    recurringJobManager.AddOrUpdate<ScrapingJob>(
+    var recurringJobs = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
+    recurringJobs.AddOrUpdate<ScrapingJob>(
         "execute-all-bots",
         job => job.ExecuteAllActiveBotsAsync(),
         Cron.Hourly());

@@ -13,19 +13,22 @@ namespace Inmobiscrap.Controllers;
 [Authorize]
 public class BotsController : ControllerBase
 {
-    private readonly ApplicationDbContext _context;
+    private readonly ApplicationDbContext  _context;
+    private readonly IRecurringJobManager  _recurringJobs;
 
-    public BotsController(ApplicationDbContext context)
+    // ID del job de Hangfire por bot: "bot-schedule-{id}"
+    private static string JobId(int botId) => $"bot-schedule-{botId}";
+
+    public BotsController(ApplicationDbContext context, IRecurringJobManager recurringJobs)
     {
-        _context = context;
+        _context       = context;
+        _recurringJobs = recurringJobs;
     }
 
     // GET: api/bots
     [HttpGet]
     public async Task<ActionResult<List<Bot>>> GetBots()
-    {
-        return await _context.Bots.ToListAsync();
-    }
+        => await _context.Bots.ToListAsync();
 
     // GET: api/bots/5
     [HttpGet("{id}")]
@@ -43,6 +46,10 @@ public class BotsController : ControllerBase
         bot.CreatedAt = DateTime.UtcNow;
         _context.Bots.Add(bot);
         await _context.SaveChangesAsync();
+
+        // Registrar job de Hangfire si viene con schedule activado
+        SyncHangfireJob(bot);
+
         return CreatedAtAction(nameof(GetBot), new { id = bot.Id }, bot);
     }
 
@@ -65,6 +72,9 @@ public class BotsController : ControllerBase
             throw;
         }
 
+        // Actualizar o eliminar job de Hangfire según nuevo estado
+        SyncHangfireJob(bot);
+
         return NoContent();
     }
 
@@ -75,14 +85,16 @@ public class BotsController : ControllerBase
         var bot = await _context.Bots.FindAsync(id);
         if (bot == null) return NotFound();
 
-        // No se puede eliminar un bot que está corriendo
         if (bot.Status == "running")
-            return BadRequest(new { message = "No se puede eliminar un bot que está en ejecución. Deténlo primero." });
+            return BadRequest(new { message = "No se puede eliminar un bot que está en ejecución." });
+
+        // Eliminar job de Hangfire asociado
+        _recurringJobs.RemoveIfExists(JobId(id));
 
         _context.Bots.Remove(bot);
         await _context.SaveChangesAsync();
 
-        return Ok(new { message = $"Bot '{bot.Name}' eliminado exitosamente.", botId = id });
+        return Ok(new { message = $"Bot '{bot.Name}' eliminado.", botId = id });
     }
 
     // POST: api/bots/5/run
@@ -102,17 +114,10 @@ public class BotsController : ControllerBase
 
         backgroundJobClient.Enqueue<ScrapingJob>(job => job.ExecuteBotAsync(id));
 
-        return Ok(new
-        {
-            message = "Bot encolado para ejecución exitosamente.",
-            botId = id,
-            botName = bot.Name
-        });
+        return Ok(new { message = "Bot encolado.", botId = id, botName = bot.Name });
     }
 
     // POST: api/bots/5/stop
-    // Marca el bot para detención. El ScraperService comprueba este flag
-    // en cada iteración y detiene el proceso limpiamente.
     [HttpPost("{id}/stop")]
     public async Task<IActionResult> StopBot(int id)
     {
@@ -122,40 +127,56 @@ public class BotsController : ControllerBase
             return NotFound(new { message = "Bot no encontrado." });
 
         if (bot.Status != "running")
-            return BadRequest(new { message = $"El bot no está en ejecución (estado actual: {bot.Status})." });
+            return BadRequest(new { message = $"El bot no está en ejecución (estado: {bot.Status})." });
 
-        // Marcar como "stopping" para que ScraperService lo detecte y detenga el loop
-        bot.Status = "stopping";
+        bot.Status    = "stopping";
         bot.UpdatedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync();
 
-        return Ok(new
-        {
-            message = $"Señal de detención enviada al bot '{bot.Name}'. Se detendrá al completar la iteración actual.",
-            botId = id,
-            botName = bot.Name
-        });
+        return Ok(new { message = $"Señal de detención enviada al bot '{bot.Name}'.", botId = id });
     }
 
-    // POST: api/bots/5/toggle  (activar / desactivar)
+    // POST: api/bots/5/toggle
     [HttpPost("{id}/toggle")]
     public async Task<IActionResult> ToggleBot(int id)
     {
         var bot = await _context.Bots.FindAsync(id);
         if (bot == null) return NotFound();
 
-        bot.IsActive = !bot.IsActive;
+        bot.IsActive  = !bot.IsActive;
         bot.UpdatedAt = DateTime.UtcNow;
         await _context.SaveChangesAsync();
 
-        return Ok(new
-        {
-            message = bot.IsActive ? $"Bot '{bot.Name}' activado." : $"Bot '{bot.Name}' desactivado.",
-            botId = id,
-            isActive = bot.IsActive
-        });
+        // Si se desactiva el bot, suspender también el job programado
+        SyncHangfireJob(bot);
+
+        return Ok(new { message = bot.IsActive ? $"Bot '{bot.Name}' activado." : $"Bot '{bot.Name}' desactivado.", isActive = bot.IsActive });
     }
 
-    private async Task<bool> BotExists(int id) =>
-        await _context.Bots.AnyAsync(e => e.Id == id);
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Sincroniza el job de Hangfire con el estado actual del bot:
+    /// - Si ScheduleEnabled=true, IsActive=true y CronExpression válida → registra/actualiza job
+    /// - En cualquier otro caso → elimina el job
+    /// </summary>
+    private void SyncHangfireJob(Bot bot)
+    {
+        var jobId = JobId(bot.Id);
+
+        if (bot.IsActive && bot.ScheduleEnabled && !string.IsNullOrWhiteSpace(bot.CronExpression))
+        {
+            _recurringJobs.AddOrUpdate<ScrapingJob>(
+                jobId,
+                job => job.ExecuteBotAsync(bot.Id),
+                bot.CronExpression);
+        }
+        else
+        {
+            _recurringJobs.RemoveIfExists(jobId);
+        }
+    }
+
+    private async Task<bool> BotExists(int id)
+        => await _context.Bots.AnyAsync(e => e.Id == id);
 }
