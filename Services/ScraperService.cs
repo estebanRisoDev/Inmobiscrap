@@ -29,7 +29,7 @@ public class ScraperService : IScraperService
     private readonly ILogger<ScraperService> _logger;
     private readonly IAmazonBedrockRuntime _bedrockClient;
     private readonly IBotLogService _botLogService;
-    private readonly IPropertyUpsertService _upsertService;  // ← NUEVO
+    private readonly IPropertyUpsertService _upsertService;
 
     public ScraperService(
         ApplicationDbContext context,
@@ -37,14 +37,14 @@ public class ScraperService : IScraperService
         ILogger<ScraperService> logger,
         IAmazonBedrockRuntime bedrockClient,
         IBotLogService botLogService,
-        IPropertyUpsertService upsertService)  // ← NUEVO
+        IPropertyUpsertService upsertService)
     {
         _context = context;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
         _bedrockClient = bedrockClient;
         _botLogService = botLogService;
-        _upsertService = upsertService;  // ← NUEVO
+        _upsertService = upsertService;
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -83,10 +83,18 @@ public class ScraperService : IScraperService
 
         try
         {
-            // Limpiar buffer de logs del bot para esta nueva ejecución
             _botLogService.ClearBotLogs(bot.Id);
 
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🚀 Bot execution started");
+
+            // Guard contra doble ejecucion (scheduler + manual simultaneos)
+            await _context.Entry(bot).ReloadAsync();
+            if (bot.Status == "running" || bot.Status == "stopping")
+            {
+                await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                    $"⚠️ Bot ya en ejecucion (status={bot.Status}). Cancelando instancia duplicada.");
+                return scrapedProperties;
+            }
 
             bot.Status = "running";
             bot.LastRun = DateTime.UtcNow;
@@ -111,7 +119,7 @@ public class ScraperService : IScraperService
             // ══════════════════════════════════════════════════════════════
             // FASE 2: Extraer datos embebidos en JSON
             // ══════════════════════════════════════════════════════════════
-            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "📦 Extracting embedded JSON data (Next.js, JSON-LD, etc.)");
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "📦 Extracting embedded JSON data (Next.js, JSON-LD, __PRELOADED_STATE__, etc.)");
             var embeddedData = ExtractEmbeddedJsonData(html);
             if (embeddedData.Length > 100)
             {
@@ -131,23 +139,21 @@ public class ScraperService : IScraperService
             }
 
             // ══════════════════════════════════════════════════════════════
-            // FASE 3: Pipeline de limpieza HTML
+            // FASE 3: Pipeline de limpieza HTML (SIMPLIFICADO)
+            // Solo eliminamos tags que NUNCA tienen contenido útil y
+            // convertimos a texto. Sin scoring ni extracción selectiva
+            // para evitar perder datos en SPAs.
             // ══════════════════════════════════════════════════════════════
-            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🧹 Removing irrelevant elements (scripts, nav, footer…)");
-            var filteredHtml = RemoveIrrelevantElements(html);
-            var reductionPercentage = html.Length > 0 ? 100 - (filteredHtml.Length * 100 / html.Length) : 0;
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🧹 Cleaning HTML (removing scripts, styles, SVGs…)");
+            var cleanedHtml = RemoveNoiseTags(html);
+            var reductionPct = html.Length > 0 ? 100 - (cleanedHtml.Length * 100 / html.Length) : 0;
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
-                $"✅ Elements removed: {filteredHtml.Length:N0} chars (reduced {reductionPercentage}%)");
+                $"✅ Noise removed: {cleanedHtml.Length:N0} chars (reduced {reductionPct}%)");
 
-            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🔍 Extracting relevant content section (scoring)");
-            var relevantHtml = ExtractRelevantContent(filteredHtml);
-            await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
-                $"✅ Relevant content: {relevantHtml.Length:N0} characters");
-
-            var strippedHtml = StripAttributesFromHtml(relevantHtml);
-
-            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "📝 Converting HTML to compact text (token optimization)");
-            var compactText = ConvertToCompactText(strippedHtml);
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "📝 Converting HTML to compact text");
+            var compactText = ConvertHtmlToText(cleanedHtml);
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name,
+                $"📝 Compact text from HTML: {compactText.Length:N0} chars");
 
             // ══════════════════════════════════════════════════════════════
             // FASE 4: Combinar texto HTML + datos embebidos
@@ -162,7 +168,8 @@ public class ScraperService : IScraperService
                 }
                 else
                 {
-                    compactText = compactText + "\n\n" + embeddedData;
+                    // Poner embedded data primero: suele ser más estructurado y útil
+                    compactText = embeddedData + "\n\n--- HTML TEXT ---\n\n" + compactText;
                 }
             }
 
@@ -173,9 +180,9 @@ public class ScraperService : IScraperService
             }
 
             // ══════════════════════════════════════════════════════════════
-            // FASE 5: Fallback a Playwright
+            // FASE 5: Fallback a Playwright si el contenido es escaso
             // ══════════════════════════════════════════════════════════════
-            if (compactText.Length < 5000 && html.Length > 10_000)
+            if (compactText.Length < 2_000 && html.Length > 10_000)
             {
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
                     $"⚠️ Sparse text ({compactText.Length} chars) — retrying with headless browser…");
@@ -189,16 +196,18 @@ public class ScraperService : IScraperService
                         return scrapedProperties;
                     }
 
-                    var jsEmbedded = ExtractEmbeddedJsonData(jsHtml);
-                    var jsFiltered = RemoveIrrelevantElements(jsHtml);
-                    var jsRelevant = ExtractRelevantContent(jsFiltered);
-                    var jsStripped = StripAttributesFromHtml(jsRelevant);
-                    var jsText     = ConvertToCompactText(jsStripped);
+                    var jsEmbedded  = ExtractEmbeddedJsonData(jsHtml);
+                    var jsCleaned   = RemoveNoiseTags(jsHtml);
+                    var jsText      = ConvertHtmlToText(jsCleaned);
 
+                    await _botLogService.LogInfoAsync(bot.Id, bot.Name,
+                        $"📦 Playwright results — HTML text: {jsText.Length:N0} chars | Embedded: {jsEmbedded.Length:N0} chars | API data: {capturedApiData.Length:N0} chars");
+
+                    // Combinar todas las fuentes de Playwright
                     var combined = new StringBuilder();
-                    if (jsText.Length > 0)          combined.AppendLine(jsText);
-                    if (jsEmbedded.Length > 100)    combined.AppendLine(jsEmbedded);
                     if (capturedApiData.Length > 100) combined.AppendLine(capturedApiData);
+                    if (jsEmbedded.Length > 100)      combined.AppendLine(jsEmbedded);
+                    if (jsText.Length > 0)             combined.AppendLine(jsText);
 
                     var playwrightResult = combined.ToString().Trim();
 
@@ -224,10 +233,10 @@ public class ScraperService : IScraperService
             // ══════════════════════════════════════════════════════════════
             // FASE 6: Verificar contenido mínimo
             // ══════════════════════════════════════════════════════════════
-            if (compactText.Length < 100)
+            if (compactText.Length < 200)
             {
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                    "⚠️ No se pudo extraer texto legible. Abortando.");
+                    "⚠️ No se pudo extraer texto legible suficiente. Abortando.");
                 bot.Status = "completed";
                 bot.LastRunCount = 0;
                 bot.UpdatedAt = DateTime.UtcNow;
@@ -263,11 +272,6 @@ public class ScraperService : IScraperService
 
             // ══════════════════════════════════════════════════════════════
             // FASE 8: Upsert + Snapshot por cada propiedad
-            //
-            // Ya NO se usa el viejo "existe? skip : insert".
-            // Ahora cada propiedad pasa por PropertyUpsertService que:
-            //   - Si es nueva → inserta Property + primer Snapshot
-            //   - Si ya existe → SIEMPRE crea Snapshot + detecta cambios
             // ══════════════════════════════════════════════════════════════
             await _botLogService.LogInfoAsync(bot.Id, bot.Name,
                 "💾 Processing properties (upsert + snapshots)...");
@@ -278,7 +282,6 @@ public class ScraperService : IScraperService
 
             for (int i = 0; i < scrapedProperties.Count; i++)
             {
-                // ── CHEQUEO STOP cada 5 propiedades ──────────────────────
                 if (i % 5 == 0 && await IsBotStoppingAsync(bot.Id))
                 {
                     await _botLogService.LogWarningAsync(bot.Id, bot.Name,
@@ -291,30 +294,15 @@ public class ScraperService : IScraperService
                 await _botLogService.SendProgressAsync(bot.Id, bot.Name, i + 1, scrapedProperties.Count,
                     $"Processing: {property.Title?.Substring(0, Math.Min(40, property.Title?.Length ?? 0))}...");
 
-                // ══════════════════════════════════════════════════════════
-                // FIX SOURCEURL: No asignar la URL del bot como SourceUrl.
-                // Si el LLM no extrajo una URL individual de la propiedad,
-                // dejar SourceUrl null para que el fingerprint use el
-                // fallback de Title + Address + City.
-                //
-                // ANTES (mal):
-                //   if (string.IsNullOrWhiteSpace(property.SourceUrl))
-                //       property.SourceUrl = bot.Url;
-                //
-                // AHORA: solo asignar si parece una URL individual
-                // (diferente a la URL del bot)
-                // ══════════════════════════════════════════════════════════
                 if (!string.IsNullOrWhiteSpace(property.SourceUrl))
                 {
-                    // Si el LLM devolvió la misma URL del bot → no es individual
                     var scraped = property.SourceUrl.Trim().TrimEnd('/');
                     var botUrl  = bot.Url.Trim().TrimEnd('/');
                     if (string.Equals(scraped, botUrl, StringComparison.OrdinalIgnoreCase))
                     {
-                        property.SourceUrl = null; // Forzar fallback
+                        property.SourceUrl = null;
                     }
                 }
-                // Si es null, el fingerprint usará Title+Address+City
 
                 var result = await _upsertService.UpsertPropertyAsync(property, bot.Id);
 
@@ -334,7 +322,6 @@ public class ScraperService : IScraperService
 
                     case UpsertResult.Unchanged:
                         unchangedCount++;
-                        // No loguear cada una para no spamear
                         break;
                 }
             }
@@ -387,6 +374,17 @@ public class ScraperService : IScraperService
     // EXTRACCIÓN DE DATOS EMBEBIDOS EN JSON
     // ══════════════════════════════════════════════════════════════════════
 
+    // Regex más robusto: greedy capture del JSON completo.
+    // Usa balanceo simple: captura desde { hasta el último } de la línea.
+    private static readonly Regex _windowAssignmentRegex = new(
+        @"window\[?['""]?__?\w+['""]?\]?\s*=\s*(\{.+\})\s*;?\s*$|window\[?['""]?__?\w+['""]?\]?\s*=\s*(\[.+\])\s*;?\s*$",
+        RegexOptions.Multiline | RegexOptions.Compiled);
+
+    // Captura self.__next_f.push([...]) usado por Next.js App Router
+    private static readonly Regex _nextFPushRegex = new(
+        @"self\.__next_f\.push\(\s*\[.*?""(.+?)""\s*\]\s*\)",
+        RegexOptions.Compiled | RegexOptions.Singleline);
+
     private static string ExtractEmbeddedJsonData(string html)
     {
         var doc = new HtmlDocument();
@@ -406,41 +404,70 @@ public class ScraperService : IScraperService
             if (string.IsNullOrEmpty(content) || content.Length < 50)
                 continue;
 
-            bool isDataScript =
-                scriptId.Contains("__next_data__") ||
-                scriptId.Contains("__nuxt") ||
+            // 1. Scripts con tipo de dato explícito (JSON-LD, JSON inline)
+            bool isTypedDataScript =
                 scriptType == "application/ld+json" ||
-                scriptType == "application/json";
+                scriptType == "application/json" ||
+                scriptId.Contains("__next_data__") ||
+                scriptId.Contains("__nuxt");
 
-            if (!isDataScript) continue;
-
-            try
+            if (isTypedDataScript)
             {
-                var jsonContent = content.Replace("<!--", "").Replace("-->", "").Trim();
-                using var jsonDoc = JsonDocument.Parse(jsonContent);
-                var extracted = ExtractTextFromJsonRecursive(jsonDoc.RootElement, maxDepth: 15);
+                TryAppendJsonContent(content, sb);
+                continue;
+            }
 
-                if (extracted.Length > 100)
+            // 2. window.X = { ... } con JSON sustancial (greedy)
+            var windowMatches = _windowAssignmentRegex.Matches(content);
+            foreach (Match match in windowMatches)
+            {
+                var jsonCandidate = (match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value).Trim();
+                if (jsonCandidate.Length > 200)
+                    TryAppendJsonContent(jsonCandidate, sb);
+            }
+
+            // 3. Next.js App Router: self.__next_f.push([...])
+            if (windowMatches.Count == 0)
+            {
+                var nextFMatches = _nextFPushRegex.Matches(content);
+                foreach (Match match in nextFMatches)
                 {
-                    sb.AppendLine("--- EMBEDDED DATA ---");
-                    sb.AppendLine(extracted);
-                    sb.AppendLine("--- END ---");
+                    var payload = match.Groups[1].Value
+                        .Replace("\\\"", "\"")
+                        .Replace("\\\\", "\\");
+                    if (payload.Length > 200)
+                        TryAppendJsonContent(payload, sb);
                 }
             }
-            catch (JsonException)
+
+            // 4. Fallback: scripts que empiezan directo con JSON
+            if (windowMatches.Count == 0 && (content.StartsWith("{") || content.StartsWith("[")))
             {
-                if (content.Length > 200 &&
-                    (content.Contains("price", StringComparison.OrdinalIgnoreCase) ||
-                     content.Contains("precio", StringComparison.OrdinalIgnoreCase)))
-                {
-                    sb.AppendLine("--- EMBEDDED DATA ---");
-                    sb.AppendLine(content[..Math.Min(content.Length, 50000)]);
-                    sb.AppendLine("--- END ---");
-                }
+                if (content.Length > 200)
+                    TryAppendJsonContent(content, sb);
             }
         }
 
         return sb.ToString();
+    }
+
+    private static void TryAppendJsonContent(string content, StringBuilder sb)
+    {
+        var jsonContent = content.Replace("<!--", "").Replace("-->", "").Trim().TrimEnd(';');
+
+        try
+        {
+            using var jsonDoc = JsonDocument.Parse(jsonContent);
+            var extracted = ExtractTextFromJsonRecursive(jsonDoc.RootElement, maxDepth: 15);
+
+            if (extracted.Length > 50)
+            {
+                sb.AppendLine("--- EMBEDDED DATA ---");
+                sb.AppendLine(extracted);
+                sb.AppendLine("--- END ---");
+            }
+        }
+        catch (JsonException) { /* JSON malformado, ignorar */ }
     }
 
     private static string ExtractTextFromJsonRecursive(JsonElement element, int maxDepth, int currentDepth = 0)
@@ -532,173 +559,66 @@ public class ScraperService : IScraperService
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // HTML PARSING Y LIMPIEZA
+    // HTML LIMPIEZA (SIMPLIFICADA)
+    // Solo eliminamos tags que NUNCA contienen datos de propiedades.
+    // NO hacemos scoring ni extracción selectiva — dejamos que el LLM
+    // se encargue de encontrar las propiedades en el texto completo.
     // ══════════════════════════════════════════════════════════════════════
 
-    private static readonly HashSet<string> _removeByTag = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> _removeTags = new(StringComparer.OrdinalIgnoreCase)
     {
-        "script", "style", "svg", "path", "noscript", "head",
-        "footer", "nav", "aside", "form", "button",
-        "iframe", "meta", "link", "input", "select", "textarea",
-        "dialog", "template", "picture", "source", "track",
-        "video", "audio", "canvas", "map", "area"
-    };
-
-    private static readonly string[] _nonContentKeywords =
-    {
-        "cookie", "modal", "popup", "overlay", "banner", "advertisement",
-        "ad-container", "ad-slot", "ads-", "-ads",
-        "social-share", "newsletter", "subscribe", "sidebar",
-        "related-", "breadcrumb", "pagination", "toolbar", "topbar",
-        "sticky-", "floating-", "whatsapp", "chat-", "cookie-bar"
-    };
-
-    private static readonly string[] _propertyKeywords =
-    {
-        "dormitorio", "dorm", "baño", "m²", "m2", "uf ", "usd",
-        "precio", "bedroom", "bath", "departamento", "casa", "arriendo",
-        "venta", "propiedad", "terreno", "oficina", "local", "hectárea",
-        "clp", "garage", "estacionamiento"
+        "script", "style", "svg", "path", "noscript",
+        "meta", "link", "iframe", "canvas",
+        "video", "audio", "source", "track", "map", "area", "template",
+        "head"
     };
 
     private static readonly HashSet<string> _blockElements = new(StringComparer.OrdinalIgnoreCase)
     {
         "div", "p", "h1", "h2", "h3", "h4", "h5", "h6",
         "li", "ul", "ol", "article", "section", "main",
-        "tr", "td", "th", "blockquote", "pre", "br", "hr"
+        "tr", "td", "th", "blockquote", "pre", "br", "hr",
+        "header", "footer", "nav", "figure", "figcaption"
     };
 
-    private static string RemoveIrrelevantElements(string html)
+    /// <summary>
+    /// Paso 1: Elimina tags de ruido (scripts, styles, SVGs, head, etc.)
+    /// NO elimina nav/header/footer porque en SPAs pueden contener listings.
+    /// </summary>
+    private static string RemoveNoiseTags(string html)
     {
         var doc = new HtmlDocument();
         doc.LoadHtml(html);
 
         doc.DocumentNode.Descendants()
-            .Where(n => _removeByTag.Contains(n.Name))
+            .Where(n => _removeTags.Contains(n.Name))
             .ToList()
             .ForEach(n => n.Remove());
 
-        var topLevelHeaders = doc.DocumentNode.SelectNodes(
-            "//body/header | //body/div/header | //body/div/div/header");
-        topLevelHeaders?.ToList().ForEach(n => n.Remove());
-
+        // Eliminar comentarios HTML
         doc.DocumentNode.Descendants()
-            .Where(n => n.NodeType == HtmlNodeType.Element)
-            .Where(n =>
-            {
-                var cls = n.GetAttributeValue("class", "").ToLower();
-                var id  = n.GetAttributeValue("id",    "").ToLower();
-                return _nonContentKeywords.Any(kw => cls.Contains(kw) || id.Contains(kw));
-            })
+            .Where(n => n.NodeType == HtmlNodeType.Comment)
             .ToList()
             .ForEach(n => n.Remove());
 
         return doc.DocumentNode.OuterHtml;
     }
 
-    private static string StripAttributesFromHtml(string html)
-    {
-        var doc = new HtmlDocument();
-        doc.LoadHtml(html);
-
-        foreach (var node in doc.DocumentNode.Descendants().ToList())
-        {
-            if (node.NodeType != HtmlNodeType.Element) continue;
-
-            if (node.Name.Equals("a", StringComparison.OrdinalIgnoreCase))
-            {
-                var href = node.GetAttributeValue("href", "").Trim();
-                var dataAttrs = node.Attributes
-                    .Where(a => a.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase))
-                    .Select(a => (a.Name, a.Value))
-                    .ToList();
-
-                node.Attributes.RemoveAll();
-
-                if (!string.IsNullOrEmpty(href) && !href.StartsWith("javascript:"))
-                    node.SetAttributeValue("href", href);
-
-                foreach (var (name, value) in dataAttrs)
-                    node.SetAttributeValue(name, value);
-            }
-            else
-            {
-                var dataAttrs = node.Attributes
-                    .Where(a => a.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase))
-                    .Select(a => (a.Name, a.Value))
-                    .ToList();
-
-                node.Attributes.RemoveAll();
-
-                foreach (var (name, value) in dataAttrs)
-                    node.SetAttributeValue(name, value);
-            }
-        }
-
-        return doc.DocumentNode.OuterHtml;
-    }
-
-    private string ExtractRelevantContent(string html)
-    {
-        var doc = new HtmlDocument();
-        doc.LoadHtml(html);
-
-        var xpathCandidates = new[]
-        {
-            "//div[contains(@class,'listing')]",
-            "//div[contains(@class,'result')]",
-            "//div[contains(@class,'property')]",
-            "//div[contains(@class,'inmueble')]",
-            "//div[contains(@class,'propiedad')]",
-            "//div[contains(@class,'search-result')]",
-            "//section[contains(@class,'listing')]",
-            "//section[contains(@class,'result')]",
-            "//ul[contains(@class,'listing')]",
-            "//ul[contains(@class,'result')]",
-            "//article",
-            "//main",
-            "//div[contains(@class,'grid')]",
-            "//section",
-            "//body",
-        };
-
-        HtmlNode? bestNode  = null;
-        int       bestScore = 0;
-
-        foreach (var xpath in xpathCandidates)
-        {
-            var nodes = doc.DocumentNode.SelectNodes(xpath);
-            if (nodes == null) continue;
-
-            foreach (var node in nodes)
-            {
-                var text  = node.InnerText.ToLower();
-                var score = _propertyKeywords.Sum(kw => CountOccurrences(text, kw));
-
-                if (node.Name is "body" or "html") score /= 3;
-
-                if (score > bestScore)
-                {
-                    bestScore = score;
-                    bestNode  = node;
-                }
-            }
-
-            if (bestNode != null && bestNode.Name is not ("body" or "html") && bestScore >= 3)
-                break;
-        }
-
-        return bestNode?.OuterHtml ?? doc.DocumentNode.OuterHtml;
-    }
-
-    private string ConvertToCompactText(string html)
+    /// <summary>
+    /// Paso 2: Convierte HTML limpio a texto compacto.
+    /// Preserva hrefs de links y atributos data-* que contienen datos.
+    /// Preserva también atributos aria-label, title, alt que pueden
+    /// contener texto de propiedades en SPAs.
+    /// </summary>
+    private static string ConvertHtmlToText(string html)
     {
         var doc = new HtmlDocument();
         doc.LoadHtml(html);
 
         var sb = new StringBuilder();
-        AppendNodeText(doc.DocumentNode, sb);
+        WalkNode(doc.DocumentNode, sb);
 
+        // Limpiar whitespace redundante
         var text = Regex.Replace(sb.ToString(), @"[ \t]+", " ");
         text = Regex.Replace(text, @"\n{3,}", "\n\n");
 
@@ -709,7 +629,7 @@ public class ScraperService : IScraperService
         return string.Join("\n", lines).Trim();
     }
 
-    private static void AppendNodeText(HtmlNode node, StringBuilder sb)
+    private static void WalkNode(HtmlNode node, StringBuilder sb)
     {
         if (node.NodeType == HtmlNodeType.Text)
         {
@@ -727,17 +647,33 @@ public class ScraperService : IScraperService
         bool isBlock = _blockElements.Contains(tag);
         if (isBlock) sb.AppendLine();
 
+        // Extraer texto de atributos que SPAs usan para renderizar contenido
+        var meaningfulAttrs = new[] { "aria-label", "title", "alt", "placeholder", "content" };
+        foreach (var attrName in meaningfulAttrs)
+        {
+            var attrVal = node.GetAttributeValue(attrName, "").Trim();
+            if (!string.IsNullOrEmpty(attrVal) && attrVal.Length > 2 && attrVal.Length < 500)
+            {
+                sb.Append($" {attrVal} ");
+            }
+        }
+
+        // Extraer data-* attributes (contienen datos estructurados)
         foreach (var attr in node.Attributes)
         {
             if (attr.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase)
                 && !string.IsNullOrWhiteSpace(attr.Value)
                 && attr.Value.Length > 1
-                && attr.Value.Length < 500)
+                && attr.Value.Length < 500
+                && !attr.Name.Contains("testid", StringComparison.OrdinalIgnoreCase)
+                && !attr.Name.Contains("tracking", StringComparison.OrdinalIgnoreCase)
+                && !attr.Name.Contains("analytics", StringComparison.OrdinalIgnoreCase))
             {
                 sb.Append($" [{attr.Name}={attr.Value}] ");
             }
         }
 
+        // Preservar href de links
         string? href = null;
         if (tag == "a")
         {
@@ -747,23 +683,12 @@ public class ScraperService : IScraperService
         }
 
         foreach (var child in node.ChildNodes)
-            AppendNodeText(child, sb);
+            WalkNode(child, sb);
 
         if (href != null)
-            sb.Append($" [{href}]");
+            sb.Append($" [link:{href}] ");
 
         if (isBlock) sb.AppendLine();
-    }
-
-    private static int CountOccurrences(string text, string keyword)
-    {
-        int count = 0, index = 0;
-        while ((index = text.IndexOf(keyword, index, StringComparison.Ordinal)) >= 0)
-        {
-            count++;
-            index += keyword.Length;
-        }
-        return count;
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -829,7 +754,7 @@ public class ScraperService : IScraperService
 
         var context = await browser.NewContextAsync(new BrowserNewContextOptions
         {
-            UserAgent    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+            UserAgent    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
             Locale       = "es-CL",
             TimezoneId   = "America/Santiago",
             ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
@@ -839,6 +764,7 @@ public class ScraperService : IScraperService
         var capturedJsonResponses = new List<string>();
         var page = await context.NewPageAsync();
 
+        // Capturar TODAS las respuestas de API (JSON, texto con datos, etc.)
         page.Response += async (_, response) =>
         {
             try
@@ -847,21 +773,50 @@ public class ScraperService : IScraperService
                 var contentType = response.Headers.GetValueOrDefault("content-type", "");
                 var status      = response.Status;
 
-                bool isJson = contentType.Contains("application/json") || contentType.Contains("text/json");
-                bool isDataEndpoint = !responseUrl.Contains(".js")
-                    && !responseUrl.Contains(".css")
-                    && !responseUrl.Contains("analytics")
-                    && !responseUrl.Contains("tracking")
-                    && !responseUrl.Contains("google")
-                    && !responseUrl.Contains("facebook")
-                    && !responseUrl.Contains("hotjar")
-                    && !responseUrl.Contains("sentry");
+                // DEBUG TEMPORAL: loguear TODAS las respuestas para identificar la API de listings
+                var ctShort = contentType.Length > 30 ? contentType[..30] : contentType;
+                var urlShort = responseUrl.Length > 150 ? responseUrl[..150] : responseUrl;
+                Console.WriteLine($"[PW-DEBUG] {status} | {ctShort} | {urlShort}");
 
-                if (isJson && isDataEndpoint && status >= 200 && status < 300)
+                // Filtrar assets estáticos
+                bool isStaticAsset =
+                       responseUrl.Contains(".js", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains(".css", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains(".woff", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains(".png", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains(".jpg", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains(".svg", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains(".gif", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains(".ico", StringComparison.OrdinalIgnoreCase);
+
+                bool isTracker =
+                       responseUrl.Contains("analytics", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains("tracking", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains("google", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains("facebook", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains("hotjar", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains("sentry", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains("newrelic", StringComparison.OrdinalIgnoreCase)
+                    || responseUrl.Contains("datadog", StringComparison.OrdinalIgnoreCase);
+
+                bool isDataResponse = contentType.Contains("json")
+                    || contentType.Contains("text/plain")
+                    || contentType.Contains("text/html");
+
+                if (!isStaticAsset && !isTracker && isDataResponse && status >= 200 && status < 300)
                 {
                     var body = await response.TextAsync();
-                    if (body.Length > 500)
+                    Console.WriteLine($"[PW-CAPTURE] Candidate: {urlShort} | bodyLen={body.Length} | startsJSON={body.TrimStart().StartsWith("{") || body.TrimStart().StartsWith("[")}");
+                    // Umbral bajo: capturar cualquier respuesta con datos
+                    if (body.Length > 100 && (body.TrimStart().StartsWith("{") || body.TrimStart().StartsWith("[")))
+                    {
                         capturedJsonResponses.Add(body);
+                        Console.WriteLine($"[PW-CAPTURED] ✅ {urlShort} | {body.Length} chars");
+                    }
+                }
+                else if (!isStaticAsset && status >= 200 && status < 300)
+                {
+                    Console.WriteLine($"[PW-SKIPPED] reason={( isTracker ? "tracker" : "not-data-content-type" )} | {urlShort}");
                 }
             }
             catch (Exception ex)
@@ -870,60 +825,212 @@ public class ScraperService : IScraperService
             }
         };
 
+        // Stealth + interceptor de fetch/XHR para capturar response bodies
+        // Playwright no siempre puede re-leer el body con response.TextAsync()
+        // así que capturamos desde JS antes de que la página consuma los datos.
+        await context.AddInitScriptAsync(@"
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins',   { get: () => [1,2,3,4,5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['es-CL','es','en'] });
+            window.chrome = { runtime: {} };
+
+            // Almacén global de respuestas capturadas
+            window.__capturedResponses = [];
+
+            // Interceptar fetch()
+            const origFetch = window.fetch;
+            window.fetch = async function(...args) {
+                const response = await origFetch.apply(this, args);
+                try {
+                    const url = (typeof args[0] === 'string') ? args[0] : args[0]?.url || '';
+                    const ct = response.headers.get('content-type') || '';
+                    // Solo capturar respuestas de datos, no assets
+                    const isData = !url.match(/\.(js|css|png|jpg|gif|svg|woff|ico)(\?|$)/i);
+                    const isTracker = /analytics|tracking|google|facebook|hotjar|sentry|clarity/i.test(url);
+                    if (isData && !isTracker && response.ok) {
+                        const clone = response.clone();
+                        clone.text().then(body => {
+                            if (body && body.length > 50) {
+                                window.__capturedResponses.push({ url: url.substring(0, 200), body: body, ct: ct });
+                            }
+                        }).catch(() => {});
+                    }
+                } catch(e) {}
+                return response;
+            };
+
+            // Interceptar XMLHttpRequest
+            const origOpen = XMLHttpRequest.prototype.open;
+            const origSend = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+                this.__url = url;
+                return origOpen.call(this, method, url, ...rest);
+            };
+            XMLHttpRequest.prototype.send = function(...args) {
+                this.addEventListener('load', function() {
+                    try {
+                        const url = this.__url || '';
+                        const isData = !url.match(/\.(js|css|png|jpg|gif|svg|woff|ico)(\?|$)/i);
+                        const isTracker = /analytics|tracking|google|facebook|hotjar|sentry|clarity/i.test(url);
+                        if (isData && !isTracker && this.status >= 200 && this.status < 300) {
+                            const body = this.responseText;
+                            if (body && body.length > 50) {
+                                window.__capturedResponses.push({ url: url.substring(0, 200), body: body, ct: this.getResponseHeader('content-type') || '' });
+                            }
+                        }
+                    } catch(e) {}
+                });
+                return origSend.apply(this, args);
+            };
+        ");
+
         try
         {
             await page.GotoAsync(url, new PageGotoOptions
             {
-                WaitUntil = WaitUntilState.NetworkIdle,
+                WaitUntil = WaitUntilState.DOMContentLoaded,
                 Timeout   = 45000
             });
         }
         catch (TimeoutException) { }
 
+        // Esperar a que el body tenga texto suficiente (polling manual)
+        for (int attempt = 0; attempt < 20; attempt++)
+        {
+            try
+            {
+                var textLength = await page.EvaluateAsync<int>("document.body?.innerText?.length ?? 0");
+                if (textLength > 1000) break;
+            }
+            catch { }
+
+            await page.WaitForTimeoutAsync(500);
+        }
+
+        // Espera adicional para XHR tardíos
         await page.WaitForTimeoutAsync(3000);
 
+        // Scroll para cargar lazy content
         try
         {
             await page.EvaluateAsync(@"
                 async () => {
                     const delay = (ms) => new Promise(r => setTimeout(r, ms));
-                    for (let i = 0; i < 10; i++) {
+                    for (let i = 0; i < 15; i++) {
                         window.scrollBy(0, 400);
-                        await delay(500);
+                        await delay(300);
                         if ((window.innerHeight + window.scrollY) >= document.body.scrollHeight - 100) break;
                     }
                     window.scrollTo(0, 0);
-                    await delay(500);
+                    await delay(1000);
                 }
             ");
         }
         catch { }
 
+        // Espera post-scroll para capturar lazy-loaded API calls
+        await page.WaitForTimeoutAsync(2000);
+
+        // CLAVE: Leer el texto visible directamente del DOM renderizado.
+        // Esto captura TODO lo que JS renderizó, sin depender de HTML parsing.
+        var domInnerText = "";
         try
         {
-            await page.WaitForFunctionAsync(
-                "() => document.body && document.body.innerText.length > 500",
-                new PageWaitForFunctionOptions { Timeout = 10000 });
+            domInnerText = await page.EvaluateAsync<string>("document.body?.innerText ?? ''") ?? "";
+            Console.WriteLine($"[PW-DOM] innerText length: {domInnerText.Length}");
+
+            // Log de preview para debug
+            if (domInnerText.Length > 0)
+            {
+                var preview = domInnerText.Length > 500 ? domInnerText[..500] : domInnerText;
+                Console.WriteLine($"[PW-DOM] Preview: {preview}");
+            }
         }
-        catch (TimeoutException) { }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[PW-DOM] Error reading innerText: {ex.Message}");
+        }
 
         var renderedHtml = await page.ContentAsync();
 
+        // Leer las respuestas capturadas por el interceptor JS
+        var jsCapturedData = new List<string>();
+        try
+        {
+            var capturedCount = await page.EvaluateAsync<int>("window.__capturedResponses?.length ?? 0");
+            Console.WriteLine($"[PW-JS-INTERCEPTOR] Captured {capturedCount} responses via JS hooks");
+
+            for (int i = 0; i < capturedCount; i++)
+            {
+                try
+                {
+                    var entry = await page.EvaluateAsync<JsonElement>($"window.__capturedResponses[{i}]");
+                    var entryUrl  = entry.GetProperty("url").GetString() ?? "";
+                    var entryBody = entry.GetProperty("body").GetString() ?? "";
+                    var entryCt   = entry.GetProperty("ct").GetString() ?? "";
+
+                    Console.WriteLine($"[PW-JS-CAPTURED] {entryUrl} | ct={entryCt.Substring(0, Math.Min(30, entryCt.Length))} | bodyLen={entryBody.Length}");
+
+                    if (entryBody.Length > 100)
+                    {
+                        jsCapturedData.Add(entryBody);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[PW-JS-ERROR] Reading entry {i}: {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[PW-JS-ERROR] Reading __capturedResponses: {ex.Message}");
+        }
+
+        // Combinar datos: Playwright response handler + JS interceptor
+        var allCapturedJson = new List<string>(capturedJsonResponses);
+        allCapturedJson.AddRange(jsCapturedData);
+
         var apiDataSb = new StringBuilder();
-        foreach (var json in capturedJsonResponses)
+        foreach (var json in allCapturedJson)
         {
             try
             {
-                using var jsonDoc = JsonDocument.Parse(json);
-                var text = ExtractTextFromJsonRecursive(jsonDoc.RootElement, maxDepth: 15);
-                if (text.Length > 100)
+                // Intentar parsear como JSON
+                var trimmed = json.Trim();
+                if (trimmed.StartsWith("{") || trimmed.StartsWith("["))
                 {
-                    apiDataSb.AppendLine("--- CAPTURED API DATA ---");
-                    apiDataSb.AppendLine(text);
-                    apiDataSb.AppendLine("--- END ---");
+                    using var jsonDoc = JsonDocument.Parse(trimmed);
+                    var text = ExtractTextFromJsonRecursive(jsonDoc.RootElement, maxDepth: 15);
+                    if (text.Length > 50)
+                    {
+                        apiDataSb.AppendLine("--- CAPTURED API DATA ---");
+                        apiDataSb.AppendLine(text);
+                        apiDataSb.AppendLine("--- END ---");
+                    }
+                }
+                else if (trimmed.Length > 200)
+                {
+                    // No es JSON pero tiene contenido (HTML con datos?)
+                    // Intentar extraer texto útil del HTML
+                    var doc = new HtmlDocument();
+                    doc.LoadHtml(trimmed);
+                    var innerText = doc.DocumentNode.InnerText?.Trim();
+                    if (!string.IsNullOrEmpty(innerText) && innerText.Length > 100)
+                    {
+                        apiDataSb.AppendLine("--- CAPTURED API HTML ---");
+                        apiDataSb.AppendLine(innerText);
+                        apiDataSb.AppendLine("--- END ---");
+                    }
                 }
             }
             catch { }
+        }
+
+        // Incluir el texto visible del DOM como fuente de datos
+        if (domInnerText.Length > 200)
+        {
+            apiDataSb.Insert(0, "--- RENDERED PAGE TEXT ---\n" + domInnerText + "\n--- END ---\n\n");
         }
 
         return (renderedHtml, apiDataSb.ToString());
@@ -933,7 +1040,12 @@ public class ScraperService : IScraperService
     // BEDROCK: Extracción con LLM
     // ══════════════════════════════════════════════════════════════════════
 
-    private static IEnumerable<string> ChunkText(string text, int maxChunkSize = 20_000)
+    /// <summary>
+    /// Divide el texto en chunks respetando separadores naturales.
+    /// Chunk size más grande (40K) porque ya no pre-filtramos tan agresivamente
+    /// y necesitamos darle más contexto al LLM.
+    /// </summary>
+    private static IEnumerable<string> ChunkText(string text, int maxChunkSize = 40_000)
     {
         if (text.Length <= maxChunkSize)
         {
@@ -948,7 +1060,10 @@ public class ScraperService : IScraperService
 
             if (end < text.Length)
             {
-                int breakPos = text.LastIndexOf("\n\n", end, Math.Min(3000, end - start));
+                // Buscar un buen punto de corte (doble newline, luego newline simple)
+                int breakPos = text.LastIndexOf("\n\n", end, Math.Min(5000, end - start));
+                if (breakPos <= start + maxChunkSize / 2)
+                    breakPos = text.LastIndexOf("\n", end, Math.Min(2000, end - start));
                 if (breakPos > start + maxChunkSize / 2)
                     end = breakPos;
             }
@@ -970,7 +1085,7 @@ public class ScraperService : IScraperService
         var modelId = Environment.GetEnvironmentVariable("BEDROCK_MODEL_ID")
             ?? "us.anthropic.claude-3-5-sonnet-20241022-v2:0";
 
-        var chunks = ChunkText(compactText, maxChunkSize: 20_000).ToList();
+        var chunks = ChunkText(compactText, maxChunkSize: 40_000).ToList();
         await _botLogService.LogInfoAsync(bot.Id, bot.Name,
             $"📦 Content split into {chunks.Count} chunk(s) (model: {modelId})");
 
@@ -1013,13 +1128,19 @@ public class ScraperService : IScraperService
     private async Task<List<Property>> ProcessChunkWithBedrock(string chunkText, Bot bot, string modelId)
     {
         var prompt = $@"Analiza el siguiente texto extraído de una página web de bienes raíces chilena.
-El texto puede incluir URLs entre corchetes como [https://...].
-También puede incluir datos estructurados con formato ""campo: valor"" extraídos de APIs.
-Los atributos data-* entre corchetes como [data-price=5000] contienen datos estructurados del HTML.
+El texto puede contener:
+- URLs entre corchetes como [link:https://...]
+- Datos estructurados con formato ""campo: valor"" extraídos de APIs o JSON embebido
+- Atributos data-* entre corchetes como [data-price=5000]
+- Texto de atributos aria-label, title, alt extraídos del HTML
+- Secciones marcadas como --- EMBEDDED DATA --- o --- CAPTURED API DATA ---
+
+El texto puede ser desordenado o repetitivo (viene de un scraper). Tu trabajo es identificar
+las propiedades inmobiliarias únicas dentro del contenido.
 
 Extrae TODAS las propiedades inmobiliarias que encuentres. Para cada una:
 - title: Título o descripción de la propiedad
-- sourceUrl: URL completa de la propiedad individual (busca en los [links] del texto o en campos como url, permalink, href). IMPORTANTE: debe ser la URL del detalle de la propiedad, NO la URL de la página de resultados/listados.
+- sourceUrl: URL completa de la propiedad individual (busca en [link:...] o en campos como url, permalink, href). IMPORTANTE: debe ser la URL del detalle de la propiedad, NO la URL de la página de resultados/listados.
 - price: Precio (solo número, sin puntos ni comas)
 - currency: Moneda detectada (CLP, UF, USD) — por defecto CLP
 - address: Dirección
@@ -1038,6 +1159,7 @@ Reglas:
 - Si no encuentras una URL individual para una propiedad, deja sourceUrl como null
 - price debe ser solo el número (ej: 150000000 para $150.000.000, o 4500 para UF 4.500)
 - Incluye TODAS las propiedades que veas, no omitas ninguna
+- Si no encuentras ninguna propiedad, responde con un array vacío
 
 Responde ÚNICAMENTE con JSON válido, sin texto adicional:
 {{
@@ -1087,8 +1209,8 @@ TEXTO:
         {
             try
             {
-                var response     = await _bedrockClient.ConverseAsync(request);
-                var stopReason   = response?.StopReason ?? "unknown";
+                var response      = await _bedrockClient.ConverseAsync(request);
+                var stopReason    = response?.StopReason ?? "unknown";
                 var contentBlocks = response?.Output?.Message?.Content;
 
                 var jsonResponse = contentBlocks?
@@ -1118,7 +1240,7 @@ TEXTO:
                 return result?.Properties?.Select(p => new Property
                 {
                     Title        = p.Title ?? string.Empty,
-                    SourceUrl    = p.SourceUrl,  // ← Ya no se fuerza bot.Url aquí
+                    SourceUrl    = p.SourceUrl,
                     Price        = p.Price,
                     Currency     = p.Currency ?? "CLP",
                     Address      = p.Address,

@@ -9,9 +9,31 @@ using Microsoft.AspNetCore.Authorization;
 
 namespace Inmobiscrap.Controllers;
 
+// ── DTOs ─────────────────────────────────────────────────────────
+
+public record CreateBotRequest(
+    string Name,
+    string Source,
+    string Url,
+    bool IsActive,
+    bool ScheduleEnabled,
+    string? CronExpression
+);
+
+public record UpdateBotRequest(
+    string Name,
+    string Source,
+    string Url,
+    bool IsActive,
+    bool ScheduleEnabled,
+    string? CronExpression
+);
+
+// ── Controller ───────────────────────────────────────────────────
+
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = "admin")]   // ← Solo admins pueden gestionar bots
+[Authorize(Roles = "admin")]
 public class BotsController : ControllerBase
 {
     private readonly ApplicationDbContext  _context;
@@ -54,11 +76,22 @@ public class BotsController : ControllerBase
 
     // POST: api/bots
     [HttpPost]
-    public async Task<ActionResult<Bot>> CreateBot(Bot bot)
+    public async Task<ActionResult<Bot>> CreateBot(CreateBotRequest req)
     {
         var userId = GetUserId();
-        bot.UserId = userId;
-        bot.CreatedAt = DateTime.UtcNow;
+
+        var bot = new Bot
+        {
+            UserId          = userId,
+            Name            = req.Name,
+            Source          = req.Source,
+            Url             = req.Url,
+            IsActive        = req.IsActive,
+            ScheduleEnabled = req.ScheduleEnabled,
+            CronExpression  = req.CronExpression,
+            CreatedAt       = DateTime.UtcNow,
+        };
+
         _context.Bots.Add(bot);
         await _context.SaveChangesAsync();
 
@@ -68,28 +101,25 @@ public class BotsController : ControllerBase
 
     // PUT: api/bots/5
     [HttpPut("{id}")]
-    public async Task<IActionResult> UpdateBot(int id, Bot bot)
+    public async Task<IActionResult> UpdateBot(int id, UpdateBotRequest req)
     {
-        if (id != bot.Id) return BadRequest();
-
         var userId = GetUserId();
         var existing = await _context.Bots
-            .AsNoTracking()
             .FirstOrDefaultAsync(b => b.Id == id && b.UserId == userId);
+
         if (existing == null) return NotFound();
 
-        bot.UserId = userId;
-        bot.UpdatedAt = DateTime.UtcNow;
-        _context.Entry(bot).State = EntityState.Modified;
+        existing.Name            = req.Name;
+        existing.Source          = req.Source;
+        existing.Url             = req.Url;
+        existing.IsActive        = req.IsActive;
+        existing.ScheduleEnabled = req.ScheduleEnabled;
+        existing.CronExpression  = req.CronExpression;
+        existing.UpdatedAt       = DateTime.UtcNow;
 
-        try { await _context.SaveChangesAsync(); }
-        catch (DbUpdateConcurrencyException)
-        {
-            if (!await BotExists(id)) return NotFound();
-            throw;
-        }
+        await _context.SaveChangesAsync();
 
-        SyncHangfireJob(bot);
+        SyncHangfireJob(existing);
         return NoContent();
     }
 
@@ -163,7 +193,7 @@ public class BotsController : ControllerBase
         SyncHangfireJob(bot);
         return Ok(new
         {
-            message = bot.IsActive ? $"Bot '{bot.Name}' activado." : $"Bot '{bot.Name}' desactivado.",
+            message  = bot.IsActive ? $"Bot '{bot.Name}' activado." : $"Bot '{bot.Name}' desactivado.",
             isActive = bot.IsActive
         });
     }
