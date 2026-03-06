@@ -99,12 +99,13 @@ builder.Services.AddHangfire(cfg => cfg
 
 builder.Services.AddHangfireServer();
 
-// ── SERVICES ──────────────────────────────────────────────────────────────────
+// ── SERVICES ──────────────────────────────────────────────────────
 builder.Services.AddHttpClient();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<IBotLogBuffer, BotLogBuffer>();
 builder.Services.AddScoped<IScraperService, ScraperService>();
 builder.Services.AddScoped<IBotLogService, BotLogService>();
+builder.Services.AddScoped<IPropertyUpsertService, PropertyUpsertService>();  // ← AGREGAR
 builder.Services.AddScoped<ScrapingJob>();
 
 builder.Services.AddControllers();

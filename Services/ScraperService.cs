@@ -29,29 +29,28 @@ public class ScraperService : IScraperService
     private readonly ILogger<ScraperService> _logger;
     private readonly IAmazonBedrockRuntime _bedrockClient;
     private readonly IBotLogService _botLogService;
+    private readonly IPropertyUpsertService _upsertService;  // ← NUEVO
 
     public ScraperService(
         ApplicationDbContext context,
         IHttpClientFactory httpClientFactory,
         ILogger<ScraperService> logger,
         IAmazonBedrockRuntime bedrockClient,
-        IBotLogService botLogService)
+        IBotLogService botLogService,
+        IPropertyUpsertService upsertService)  // ← NUEVO
     {
         _context = context;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
         _bedrockClient = bedrockClient;
         _botLogService = botLogService;
+        _upsertService = upsertService;  // ← NUEVO
     }
 
     // ══════════════════════════════════════════════════════════════════════
     // STOP SIGNAL HELPERS
     // ══════════════════════════════════════════════════════════════════════
 
-    /// <summary>
-    /// Verifica si el bot recibió señal de detención desde la UI.
-    /// Usa AsNoTracking para no interferir con el contexto de EF actual.
-    /// </summary>
     private async Task<bool> IsBotStoppingAsync(int botId)
     {
         var status = await _context.Bots
@@ -63,13 +62,10 @@ public class ScraperService : IScraperService
         return status == "stopping";
     }
 
-    /// <summary>
-    /// Maneja la detención limpia del bot: loguea, actualiza estado y retorna.
-    /// </summary>
     private async Task HandleStopAsync(Bot bot, int newCount)
     {
         await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-            $"🛑 Bot detenido manualmente. Propiedades guardadas en esta sesión: {newCount}");
+            $"🛑 Bot detenido manualmente. Propiedades procesadas en esta sesión: {newCount}");
 
         bot.Status = "stopped";
         bot.UpdatedAt = DateTime.UtcNow;
@@ -87,9 +83,11 @@ public class ScraperService : IScraperService
 
         try
         {
+            // Limpiar buffer de logs del bot para esta nueva ejecución
+            _botLogService.ClearBotLogs(bot.Id);
+
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🚀 Bot execution started");
 
-            // Actualizar estado del bot
             bot.Status = "running";
             bot.LastRun = DateTime.UtcNow;
             bot.UpdatedAt = DateTime.UtcNow;
@@ -104,7 +102,6 @@ public class ScraperService : IScraperService
             var html = await DownloadHtmlAsync(bot);
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name, $"✅ HTML downloaded: {html.Length:N0} characters");
 
-            // ── CHEQUEO STOP después de descarga ─────────────────────────
             if (await IsBotStoppingAsync(bot.Id))
             {
                 await HandleStopAsync(bot, 0);
@@ -112,7 +109,7 @@ public class ScraperService : IScraperService
             }
 
             // ══════════════════════════════════════════════════════════════
-            // FASE 2: Extraer datos embebidos en JSON ANTES de limpiar
+            // FASE 2: Extraer datos embebidos en JSON
             // ══════════════════════════════════════════════════════════════
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "📦 Extracting embedded JSON data (Next.js, JSON-LD, etc.)");
             var embeddedData = ExtractEmbeddedJsonData(html);
@@ -127,7 +124,6 @@ public class ScraperService : IScraperService
                     "ℹ️ No embedded JSON data found (site may load data via XHR)");
             }
 
-            // ── CHEQUEO STOP después de extracción JSON ───────────────────
             if (await IsBotStoppingAsync(bot.Id))
             {
                 await HandleStopAsync(bot, 0);
@@ -135,7 +131,7 @@ public class ScraperService : IScraperService
             }
 
             // ══════════════════════════════════════════════════════════════
-            // FASE 3: Pipeline de limpieza HTML estándar
+            // FASE 3: Pipeline de limpieza HTML
             // ══════════════════════════════════════════════════════════════
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🧹 Removing irrelevant elements (scripts, nav, footer…)");
             var filteredHtml = RemoveIrrelevantElements(html);
@@ -154,7 +150,7 @@ public class ScraperService : IScraperService
             var compactText = ConvertToCompactText(strippedHtml);
 
             // ══════════════════════════════════════════════════════════════
-            // FASE 4: Combinar texto HTML + datos embebidos de JSON
+            // FASE 4: Combinar texto HTML + datos embebidos
             // ══════════════════════════════════════════════════════════════
             if (embeddedData.Length > 100)
             {
@@ -170,7 +166,6 @@ public class ScraperService : IScraperService
                 }
             }
 
-            // ── CHEQUEO STOP antes del fallback Playwright ────────────────
             if (await IsBotStoppingAsync(bot.Id))
             {
                 await HandleStopAsync(bot, 0);
@@ -178,17 +173,16 @@ public class ScraperService : IScraperService
             }
 
             // ══════════════════════════════════════════════════════════════
-            // FASE 5: Fallback a Playwright si aún no hay texto suficiente
+            // FASE 5: Fallback a Playwright
             // ══════════════════════════════════════════════════════════════
             if (compactText.Length < 5000 && html.Length > 10_000)
             {
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                    $"⚠️ Sparse text ({compactText.Length} chars) — page likely loads data via XHR. Retrying with headless browser…");
+                    $"⚠️ Sparse text ({compactText.Length} chars) — retrying with headless browser…");
                 try
                 {
                     var (jsHtml, capturedApiData) = await DownloadHtmlWithPlaywrightAsync(bot.Url);
 
-                    // ── CHEQUEO STOP después de Playwright (puede tardar bastante) ──
                     if (await IsBotStoppingAsync(bot.Id))
                     {
                         await HandleStopAsync(bot, 0);
@@ -212,13 +206,12 @@ public class ScraperService : IScraperService
                     {
                         compactText = playwrightResult;
                         await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
-                            $"✅ Headless browser extracted content: {compactText.Length:N0} chars " +
-                            $"(DOM: {jsText.Length}, embedded: {jsEmbedded.Length}, API: {capturedApiData.Length})");
+                            $"✅ Headless browser extracted: {compactText.Length:N0} chars");
                     }
                     else
                     {
                         await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                            $"⚠️ Headless browser also sparse (DOM: {jsText.Length}, embedded: {jsEmbedded.Length}, API: {capturedApiData.Length})");
+                            $"⚠️ Headless browser also sparse ({playwrightResult.Length} chars)");
                     }
                 }
                 catch (Exception ex)
@@ -229,27 +222,24 @@ public class ScraperService : IScraperService
             }
 
             // ══════════════════════════════════════════════════════════════
-            // FASE 6: Verificar que tenemos contenido
+            // FASE 6: Verificar contenido mínimo
             // ══════════════════════════════════════════════════════════════
             if (compactText.Length < 100)
             {
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                    "⚠️ No se pudo extraer texto legible de la página. " +
-                    "La página puede requerir autenticación o renderizado JS especial. " +
-                    "Abortando — no se enviarán tokens vacíos a Bedrock.");
+                    "⚠️ No se pudo extraer texto legible. Abortando.");
                 bot.Status = "completed";
                 bot.LastRunCount = 0;
                 bot.UpdatedAt = DateTime.UtcNow;
                 await _context.SaveChangesAsync();
                 await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
-                    "🎉 Bot execution completed. Scraped: 0 | New: 0 | Total: " + bot.TotalScraped);
+                    "🎉 Bot completed. Scraped: 0 | New: 0 | Total: " + bot.TotalScraped);
                 return scrapedProperties;
             }
 
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
                 $"✅ Compact text ready: {compactText.Length:N0} characters");
 
-            // ── CHEQUEO STOP antes de llamar a Bedrock (la llamada más costosa) ──
             if (await IsBotStoppingAsync(bot.Id))
             {
                 await HandleStopAsync(bot, 0);
@@ -265,7 +255,6 @@ public class ScraperService : IScraperService
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
                 $"✅ AI processing completed: {scrapedProperties.Count} properties found");
 
-            // ── CHEQUEO STOP antes de guardar en BD ──────────────────────
             if (await IsBotStoppingAsync(bot.Id))
             {
                 await HandleStopAsync(bot, 0);
@@ -273,11 +262,19 @@ public class ScraperService : IScraperService
             }
 
             // ══════════════════════════════════════════════════════════════
-            // FASE 8: Guardar propiedades en la BD
+            // FASE 8: Upsert + Snapshot por cada propiedad
+            //
+            // Ya NO se usa el viejo "existe? skip : insert".
+            // Ahora cada propiedad pasa por PropertyUpsertService que:
+            //   - Si es nueva → inserta Property + primer Snapshot
+            //   - Si ya existe → SIEMPRE crea Snapshot + detecta cambios
             // ══════════════════════════════════════════════════════════════
-            await _botLogService.LogInfoAsync(bot.Id, bot.Name, "💾 Checking for duplicates and saving new properties");
-            int newPropertiesCount = 0;
-            int duplicatesCount = 0;
+            await _botLogService.LogInfoAsync(bot.Id, bot.Name,
+                "💾 Processing properties (upsert + snapshots)...");
+
+            int newCount = 0;
+            int updatedCount = 0;
+            int unchangedCount = 0;
 
             for (int i = 0; i < scrapedProperties.Count; i++)
             {
@@ -285,66 +282,89 @@ public class ScraperService : IScraperService
                 if (i % 5 == 0 && await IsBotStoppingAsync(bot.Id))
                 {
                     await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                        $"⚠️ Stop signal received. Halting at {i}/{scrapedProperties.Count} properties.");
+                        $"⚠️ Stop signal at {i}/{scrapedProperties.Count}.");
                     break;
                 }
 
                 var property = scrapedProperties[i];
 
                 await _botLogService.SendProgressAsync(bot.Id, bot.Name, i + 1, scrapedProperties.Count,
-                    $"Processing property: {property.Title?.Substring(0, Math.Min(40, property.Title?.Length ?? 0))}...");
+                    $"Processing: {property.Title?.Substring(0, Math.Min(40, property.Title?.Length ?? 0))}...");
 
-                if (string.IsNullOrWhiteSpace(property.SourceUrl))
-                    property.SourceUrl = bot.Url;
-
-                var srcUrl = property.SourceUrl ?? "";
-                var title  = property.Title ?? "";
-                var price  = property.Price;
-
-                var exists = await _context.Properties.AnyAsync(p =>
-                    p.SourceUrl == srcUrl &&
-                    p.Title == title &&
-                    p.Price == price);
-
-                if (!exists)
+                // ══════════════════════════════════════════════════════════
+                // FIX SOURCEURL: No asignar la URL del bot como SourceUrl.
+                // Si el LLM no extrajo una URL individual de la propiedad,
+                // dejar SourceUrl null para que el fingerprint use el
+                // fallback de Title + Address + City.
+                //
+                // ANTES (mal):
+                //   if (string.IsNullOrWhiteSpace(property.SourceUrl))
+                //       property.SourceUrl = bot.Url;
+                //
+                // AHORA: solo asignar si parece una URL individual
+                // (diferente a la URL del bot)
+                // ══════════════════════════════════════════════════════════
+                if (!string.IsNullOrWhiteSpace(property.SourceUrl))
                 {
-                    _context.Properties.Add(property);
-                    newPropertiesCount++;
-                    await _botLogService.LogInfoAsync(bot.Id, bot.Name,
-                        $"➕ New property added: {property.Title}");
+                    // Si el LLM devolvió la misma URL del bot → no es individual
+                    var scraped = property.SourceUrl.Trim().TrimEnd('/');
+                    var botUrl  = bot.Url.Trim().TrimEnd('/');
+                    if (string.Equals(scraped, botUrl, StringComparison.OrdinalIgnoreCase))
+                    {
+                        property.SourceUrl = null; // Forzar fallback
+                    }
                 }
-                else
+                // Si es null, el fingerprint usará Title+Address+City
+
+                var result = await _upsertService.UpsertPropertyAsync(property, bot.Id);
+
+                switch (result)
                 {
-                    duplicatesCount++;
-                    await _botLogService.LogInfoAsync(bot.Id, bot.Name,
-                        $"⏭️ Duplicate skipped: {property.Title}");
+                    case UpsertResult.New:
+                        newCount++;
+                        await _botLogService.LogInfoAsync(bot.Id, bot.Name,
+                            $"➕ Nueva: {property.Title}");
+                        break;
+
+                    case UpsertResult.Updated:
+                        updatedCount++;
+                        await _botLogService.LogInfoAsync(bot.Id, bot.Name,
+                            $"📝 Actualizada: {property.Title}");
+                        break;
+
+                    case UpsertResult.Unchanged:
+                        unchangedCount++;
+                        // No loguear cada una para no spamear
+                        break;
                 }
             }
 
             await _context.SaveChangesAsync();
+
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
-                $"💾 Saved {newPropertiesCount} new properties (skipped {duplicatesCount} duplicates)");
+                $"💾 Resultado: {newCount} nuevas | {updatedCount} actualizadas | {unchangedCount} sin cambios " +
+                $"({newCount + updatedCount + unchangedCount} snapshots creados)");
 
             // ══════════════════════════════════════════════════════════════
             // FASE 9: Actualizar estado final del bot
-            // Refrescamos desde BD para leer el status real (puede ser "stopping")
             // ══════════════════════════════════════════════════════════════
             await _context.Entry(bot).ReloadAsync();
             var wasStopped = bot.Status == "stopping";
 
             bot.Status       = wasStopped ? "stopped" : "completed";
             bot.LastRunCount = scrapedProperties.Count;
-            bot.TotalScraped += newPropertiesCount;
+            bot.TotalScraped += newCount;
             bot.UpdatedAt    = DateTime.UtcNow;
             bot.LastError    = null;
             await _context.SaveChangesAsync();
 
             var finalMsg = wasStopped
-                ? $"🛑 Bot detenido manualmente. Guardadas: {newPropertiesCount} | Total acumulado: {bot.TotalScraped}"
-                : $"🎉 Bot execution completed! Scraped: {scrapedProperties.Count} | New: {newPropertiesCount} | Total: {bot.TotalScraped}";
+                ? $"🛑 Detenido. Nuevas: {newCount} | Actualizadas: {updatedCount} | Total acumulado: {bot.TotalScraped}"
+                : $"🎉 Completado! Nuevas: {newCount} | Actualizadas: {updatedCount} | Sin cambios: {unchangedCount} | Total: {bot.TotalScraped}";
 
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name, finalMsg);
-            _logger.LogInformation($"Bot {bot.Id} finished with status '{bot.Status}'. Scraped {scrapedProperties.Count} properties.");
+            _logger.LogInformation("Bot {BotId} finished '{Status}'. New: {New}, Updated: {Updated}, Unchanged: {Unchanged}",
+                bot.Id, bot.Status, newCount, updatedCount, unchangedCount);
         }
         catch (Exception ex)
         {
@@ -356,7 +376,7 @@ public class ScraperService : IScraperService
             bot.UpdatedAt = DateTime.UtcNow;
             await _context.SaveChangesAsync();
 
-            _logger.LogError(ex, $"Error in bot {bot.Id}");
+            _logger.LogError(ex, "Error in bot {BotId}", bot.Id);
             throw;
         }
 
@@ -558,7 +578,6 @@ public class ScraperService : IScraperService
             .ToList()
             .ForEach(n => n.Remove());
 
-        // Solo remover <header> de nivel superior
         var topLevelHeaders = doc.DocumentNode.SelectNodes(
             "//body/header | //body/div/header | //body/div/div/header");
         topLevelHeaders?.ToList().ForEach(n => n.Remove());
@@ -708,7 +727,6 @@ public class ScraperService : IScraperService
         bool isBlock = _blockElements.Contains(tag);
         if (isBlock) sb.AppendLine();
 
-        // Emitir data-* como texto para que Bedrock los vea
         foreach (var attr in node.Attributes)
         {
             if (attr.Name.StartsWith("data-", StringComparison.OrdinalIgnoreCase)
@@ -792,7 +810,7 @@ public class ScraperService : IScraperService
     }
 
     // ══════════════════════════════════════════════════════════════════════
-    // PLAYWRIGHT: Descarga con browser headless + intercepción de APIs
+    // PLAYWRIGHT
     // ══════════════════════════════════════════════════════════════════════
 
     private static async Task<(string html, string capturedApiData)> DownloadHtmlWithPlaywrightAsync(string url)
@@ -860,11 +878,10 @@ public class ScraperService : IScraperService
                 Timeout   = 45000
             });
         }
-        catch (TimeoutException) { /* Algunas SPAs nunca llegan a NetworkIdle */ }
+        catch (TimeoutException) { }
 
         await page.WaitForTimeoutAsync(3000);
 
-        // Auto-scroll para disparar lazy loading
         try
         {
             await page.EvaluateAsync(@"
@@ -962,11 +979,10 @@ public class ScraperService : IScraperService
 
         for (int i = 0; i < chunks.Count; i++)
         {
-            // ── CHEQUEO STOP entre chunks de Bedrock ─────────────────
             if (await IsBotStoppingAsync(bot.Id))
             {
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                    $"⚠️ Stop signal received between Bedrock chunks ({i}/{chunks.Count}).");
+                    $"⚠️ Stop signal between chunks ({i}/{chunks.Count}).");
                 break;
             }
 
@@ -1003,7 +1019,7 @@ Los atributos data-* entre corchetes como [data-price=5000] contienen datos estr
 
 Extrae TODAS las propiedades inmobiliarias que encuentres. Para cada una:
 - title: Título o descripción de la propiedad
-- sourceUrl: URL completa de la propiedad (busca en los [links] del texto o en campos como url, permalink)
+- sourceUrl: URL completa de la propiedad individual (busca en los [links] del texto o en campos como url, permalink, href). IMPORTANTE: debe ser la URL del detalle de la propiedad, NO la URL de la página de resultados/listados.
 - price: Precio (solo número, sin puntos ni comas)
 - currency: Moneda detectada (CLP, UF, USD) — por defecto CLP
 - address: Dirección
@@ -1018,7 +1034,8 @@ Extrae TODAS las propiedades inmobiliarias que encuentres. Para cada una:
 
 Reglas:
 - Si un campo no está presente, usa null (no inventes datos)
-- sourceUrl debe ser la URL real de la propiedad, no la del sitio general
+- sourceUrl debe ser la URL específica de la propiedad, no la URL general del sitio
+- Si no encuentras una URL individual para una propiedad, deja sourceUrl como null
 - price debe ser solo el número (ej: 150000000 para $150.000.000, o 4500 para UF 4.500)
 - Incluye TODAS las propiedades que veas, no omitas ninguna
 
@@ -1101,7 +1118,7 @@ TEXTO:
                 return result?.Properties?.Select(p => new Property
                 {
                     Title        = p.Title ?? string.Empty,
-                    SourceUrl    = string.IsNullOrWhiteSpace(p.SourceUrl) ? bot.Url : p.SourceUrl,
+                    SourceUrl    = p.SourceUrl,  // ← Ya no se fuerza bot.Url aquí
                     Price        = p.Price,
                     Currency     = p.Currency ?? "CLP",
                     Address      = p.Address,
@@ -1125,7 +1142,7 @@ TEXTO:
             {
                 var delay = 2000 * (attempt + 1);
                 await _botLogService.LogWarningAsync(bot.Id, bot.Name,
-                    $"⚠️ Bedrock API error (attempt {attempt + 1}/{maxRetries + 1}): {ex.Message}. Retrying in {delay}ms...");
+                    $"⚠️ Bedrock error (attempt {attempt + 1}): {ex.Message}. Retrying in {delay}ms...");
                 await Task.Delay(delay);
             }
             catch (Exception ex)
@@ -1151,7 +1168,7 @@ TEXTO:
             new Property
             {
                 Title        = $"Mock property for {bot.Name}",
-                SourceUrl    = bot.Url,
+                SourceUrl    = $"{bot.Url}/mock-property-1",
                 Price        = 100000000,
                 Currency     = "CLP",
                 Address      = "Av. Providencia 123",
@@ -1167,7 +1184,7 @@ TEXTO:
         };
 
     // ══════════════════════════════════════════════════════════════════════
-    // DTOs internos para deserializar respuesta de Bedrock
+    // DTOs internos para Bedrock
     // ══════════════════════════════════════════════════════════════════════
 
     private class BedrockResponse

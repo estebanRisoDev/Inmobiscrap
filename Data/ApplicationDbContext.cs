@@ -6,13 +6,12 @@ namespace Inmobiscrap.Data;
 public class ApplicationDbContext : DbContext
 {
     public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
-        : base(options)
-    {
-    }
+        : base(options) { }
 
-    public DbSet<Property> Properties { get; set; } = null!;
-    public DbSet<Bot>      Bots       { get; set; } = null!;
-    public DbSet<User>     Users      { get; set; } = null!;
+    public DbSet<Property>         Properties { get; set; } = null!;
+    public DbSet<PropertySnapshot> PropertySnapshots { get; set; } = null!;
+    public DbSet<Bot>              Bots       { get; set; } = null!;
+    public DbSet<User>             Users      { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -33,9 +32,43 @@ public class ApplicationDbContext : DbContext
             entity.Property(p => p.Price).HasPrecision(18, 2);
             entity.Property(p => p.Area).HasPrecision(10, 2);
 
+            // Tracking
+            entity.Property(p => p.Fingerprint).HasMaxLength(64);
+            entity.Property(p => p.ListingStatus).HasMaxLength(30).HasDefaultValue("active");
+            entity.Property(p => p.TimesScraped).HasDefaultValue(1);
+            entity.Property(p => p.PreviousPrice).HasPrecision(18, 2);
+
+            entity.HasIndex(p => p.Fingerprint).HasDatabaseName("IX_Properties_Fingerprint");
+            entity.HasIndex(p => p.SourceUrl).HasDatabaseName("IX_Properties_SourceUrl");
+            entity.HasIndex(p => p.ListingStatus).HasDatabaseName("IX_Properties_ListingStatus");
             entity.HasIndex(p => new { p.City, p.PropertyType }).HasDatabaseName("IX_Properties_City_Type");
             entity.HasIndex(p => p.City).HasDatabaseName("IX_Properties_City");
             entity.HasIndex(p => p.Price).HasDatabaseName("IX_Properties_Price");
+        });
+
+        // ============ PROPERTY SNAPSHOT ============
+        modelBuilder.Entity<PropertySnapshot>(entity =>
+        {
+            entity.Property(s => s.ScrapedAt).HasDefaultValueSql("NOW()");
+            entity.Property(s => s.Currency).HasMaxLength(10);
+            entity.Property(s => s.PropertyType).HasMaxLength(50);
+            entity.Property(s => s.Title).HasMaxLength(500);
+            entity.Property(s => s.Price).HasPrecision(18, 2);
+            entity.Property(s => s.Area).HasPrecision(10, 2);
+            entity.Property(s => s.HasChanges).HasDefaultValue(false);
+            entity.Property(s => s.ChangedFields).HasMaxLength(200);
+
+            entity.HasOne(s => s.Property)
+                  .WithMany(p => p.Snapshots)
+                  .HasForeignKey(s => s.PropertyId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Índices para consultas rápidas
+            entity.HasIndex(s => s.PropertyId).HasDatabaseName("IX_Snapshots_PropertyId");
+            entity.HasIndex(s => s.ScrapedAt).HasDatabaseName("IX_Snapshots_ScrapedAt");
+            entity.HasIndex(s => s.BotId).HasDatabaseName("IX_Snapshots_BotId");
+            entity.HasIndex(s => new { s.PropertyId, s.ScrapedAt })
+                  .HasDatabaseName("IX_Snapshots_Property_Date");
         });
 
         // ============ BOT ============
@@ -53,7 +86,6 @@ public class ApplicationDbContext : DbContext
             entity.Property(b => b.ScheduleEnabled).HasDefaultValue(false);
             entity.Property(b => b.CronExpression).HasMaxLength(100);
 
-            // FK → User
             entity.HasOne(b => b.User)
                   .WithMany(u => u.Bots)
                   .HasForeignKey(b => b.UserId)
@@ -76,8 +108,6 @@ public class ApplicationDbContext : DbContext
             entity.Property(u => u.Role).HasMaxLength(20).HasDefaultValue("user");
             entity.Property(u => u.IsActive).HasDefaultValue(true);
             entity.Property(u => u.CreatedAt).HasDefaultValueSql("NOW()");
-
-            // Plan y créditos
             entity.Property(u => u.Plan).HasMaxLength(20).HasDefaultValue("base");
             entity.Property(u => u.Credits).HasDefaultValue(50);
 
