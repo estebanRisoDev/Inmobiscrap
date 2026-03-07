@@ -108,10 +108,12 @@ builder.Services.AddSingleton<IBotLogBuffer, BotLogBuffer>();
 builder.Services.AddScoped<IScraperService, ScraperService>();
 builder.Services.AddScoped<IBotLogService, BotLogService>();
 builder.Services.AddScoped<IPropertyUpsertService, PropertyUpsertService>();
+builder.Services.AddScoped<IReportService, ReportService>(); 
 builder.Services.AddScoped<ScrapingJob>();
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
+
 
 // ── SWAGGER con JWT Bearer ────────────────────────────────────────────────────
 // FIX: usar SecuritySchemeType.Http + Scheme "bearer" en vez de ApiKey.

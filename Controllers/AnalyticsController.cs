@@ -21,17 +21,12 @@ public class AnalyticsController : ControllerBase
         return int.TryParse(claim, out var id) ? id : 0;
     }
 
-    /// <summary>
-    /// Consume 1 crédito para usuarios con plan base.
-    /// Pro y admin pasan sin costo.
-    /// </summary>
     private async Task<IActionResult?> ConsumeCredit()
     {
         var userId = GetUserId();
         var user = await _context.Users.FindAsync(userId);
         if (user == null) return Unauthorized();
 
-        // Pro o admin → sin límites
         if (user.Plan == "pro" || user.Role == "admin") return null;
 
         if (user.Credits <= 0)
@@ -50,7 +45,7 @@ public class AnalyticsController : ControllerBase
         return null;
     }
 
-    // GET /api/analytics/locations — Sin costo (poblar filtros)
+    // GET /api/analytics/locations
     [HttpGet("locations")]
     public async Task<IActionResult> GetLocations(
         [FromQuery] string? region = null,
@@ -77,7 +72,7 @@ public class AnalyticsController : ControllerBase
         return Ok(new { regions, cities, neighborhoods, propertyTypes });
     }
 
-    // GET /api/analytics/market — Consume 1 crédito (plan base)
+    // GET /api/analytics/market
     [HttpGet("market")]
     public async Task<IActionResult> GetMarket(
         [FromQuery] string? region = null, [FromQuery] string? city = null,
@@ -90,28 +85,79 @@ public class AnalyticsController : ControllerBase
 
         var totalProperties = await query.CountAsync();
 
-        var byType = await query
+        // ── FIX: Agrupar por (PropertyType, Currency) para nunca mezclar UF con CLP ──
+        // Luego en memoria elegimos la moneda dominante por tipo de propiedad.
+        var byTypeRaw = await query
             .Where(p => p.PropertyType != null)
-            .GroupBy(p => p.PropertyType!)
+            .GroupBy(p => new { p.PropertyType, Currency = p.Currency ?? "CLP" })
             .Select(g => new
             {
-                type = g.Key, count = g.Count(),
-                avgPrice = g.Where(p => p.Price > 0).Any() ? (double?)g.Where(p => p.Price > 0).Average(p => (double)p.Price!) : null,
-                avgBedrooms = g.Where(p => p.Bedrooms > 0).Any() ? (double?)g.Where(p => p.Bedrooms > 0).Average(p => (double)p.Bedrooms!) : null,
-                avgBathrooms = g.Where(p => p.Bathrooms > 0).Any() ? (double?)g.Where(p => p.Bathrooms > 0).Average(p => (double)p.Bathrooms!) : null,
-                avgArea = g.Where(p => p.Area > 0).Any() ? (double?)g.Where(p => p.Area > 0).Average(p => (double)p.Area!) : null,
-                minPrice = g.Where(p => p.Price > 0).Any() ? (double?)g.Where(p => p.Price > 0).Min(p => (double)p.Price!) : null,
-                maxPrice = g.Where(p => p.Price > 0).Any() ? (double?)g.Where(p => p.Price > 0).Max(p => (double)p.Price!) : null,
+                type         = g.Key.PropertyType!,
+                currency     = g.Key.Currency,
+                count        = g.Count(),
+                avgPrice     = g.Where(p => p.Price > 0).Any()
+                                ? (double?)g.Where(p => p.Price > 0).Average(p => (double)p.Price!)
+                                : null,
+                avgBedrooms  = g.Where(p => p.Bedrooms > 0).Any()
+                                ? (double?)g.Where(p => p.Bedrooms > 0).Average(p => (double)p.Bedrooms!)
+                                : null,
+                avgBathrooms = g.Where(p => p.Bathrooms > 0).Any()
+                                ? (double?)g.Where(p => p.Bathrooms > 0).Average(p => (double)p.Bathrooms!)
+                                : null,
+                avgArea      = g.Where(p => p.Area > 0).Any()
+                                ? (double?)g.Where(p => p.Area > 0).Average(p => (double)p.Area!)
+                                : null,
+                minPrice     = g.Where(p => p.Price > 0).Any()
+                                ? (double?)g.Where(p => p.Price > 0).Min(p => (double)p.Price!)
+                                : null,
+                maxPrice     = g.Where(p => p.Price > 0).Any()
+                                ? (double?)g.Where(p => p.Price > 0).Max(p => (double)p.Price!)
+                                : null,
             })
-            .OrderByDescending(g => g.count).ToListAsync();
+            .OrderByDescending(g => g.count)
+            .ToListAsync();
+
+        // En memoria: por cada PropertyType, elegir la moneda con más propiedades.
+        // Esto evita que un tipo aparezca duplicado (ej. Casa-UF y Casa-CLP) y
+        // garantiza que avgPrice/minPrice/maxPrice correspondan a una sola moneda.
+        var byType = byTypeRaw
+            .GroupBy(g => g.type)
+            .Select(g =>
+            {
+                // Moneda dominante = la que tiene más registros con precio
+                var dominant = g.OrderByDescending(x => x.count).First();
+
+                return new
+                {
+                    type         = dominant.type,
+                    currency     = dominant.currency,
+                    count        = g.Sum(x => x.count),          // total real = suma de ambas monedas
+                    avgPrice     = dominant.avgPrice,             // precio solo de la moneda dominante
+                    avgBedrooms  = dominant.avgBedrooms
+                                   ?? g.FirstOrDefault(x => x.avgBedrooms.HasValue)?.avgBedrooms,
+                    avgBathrooms = dominant.avgBathrooms
+                                   ?? g.FirstOrDefault(x => x.avgBathrooms.HasValue)?.avgBathrooms,
+                    avgArea      = dominant.avgArea
+                                   ?? g.FirstOrDefault(x => x.avgArea.HasValue)?.avgArea,
+                    minPrice     = dominant.minPrice,
+                    maxPrice     = dominant.maxPrice,
+                    // Extra: exponer cuántas propiedades había en cada moneda (útil para debug)
+                    currencyBreakdown = g.Select(x => new { x.currency, x.count }).ToList(),
+                };
+            })
+            .OrderByDescending(g => g.count)
+            .ToList();
 
         var topNeighborhoods = await query
             .Where(p => p.Neighborhood != null || p.City != null)
             .GroupBy(p => p.Neighborhood ?? p.City ?? "Sin dato")
             .Select(g => new
             {
-                name = g.Key, count = g.Count(),
-                avgPrice = g.Where(p => p.Price > 0).Any() ? (double?)g.Where(p => p.Price > 0).Average(p => (double)p.Price!) : null,
+                name     = g.Key,
+                count    = g.Count(),
+                avgPrice = g.Where(p => p.Price > 0).Any()
+                            ? (double?)g.Where(p => p.Price > 0).Average(p => (double)p.Price!)
+                            : null,
             })
             .OrderByDescending(g => g.count).Take(10).ToListAsync();
 
@@ -120,10 +166,18 @@ public class AnalyticsController : ControllerBase
             .GroupBy(_ => 1)
             .Select(g => new
             {
-                avgPrice = g.Where(p => p.Price > 0).Any() ? (double?)g.Where(p => p.Price > 0).Average(p => (double)p.Price!) : null,
-                avgBedrooms = g.Where(p => p.Bedrooms > 0).Any() ? (double?)g.Where(p => p.Bedrooms > 0).Average(p => (double)p.Bedrooms!) : null,
-                avgBathrooms = g.Where(p => p.Bathrooms > 0).Any() ? (double?)g.Where(p => p.Bathrooms > 0).Average(p => (double)p.Bathrooms!) : null,
-                avgArea = g.Where(p => p.Area > 0).Any() ? (double?)g.Where(p => p.Area > 0).Average(p => (double)p.Area!) : null,
+                avgPrice     = g.Where(p => p.Price > 0).Any()
+                                ? (double?)g.Where(p => p.Price > 0).Average(p => (double)p.Price!)
+                                : null,
+                avgBedrooms  = g.Where(p => p.Bedrooms > 0).Any()
+                                ? (double?)g.Where(p => p.Bedrooms > 0).Average(p => (double)p.Bedrooms!)
+                                : null,
+                avgBathrooms = g.Where(p => p.Bathrooms > 0).Any()
+                                ? (double?)g.Where(p => p.Bathrooms > 0).Average(p => (double)p.Bathrooms!)
+                                : null,
+                avgArea      = g.Where(p => p.Area > 0).Any()
+                                ? (double?)g.Where(p => p.Area > 0).Average(p => (double)p.Area!)
+                                : null,
             })
             .FirstOrDefaultAsync();
 
@@ -137,14 +191,16 @@ public class AnalyticsController : ControllerBase
 
         return Ok(new
         {
-            totalProperties, byType, topNeighborhoods,
-            globalAverages = globalAvgs,
-            priceDistribution = new { uf = BuildPriceRanges(ufPrices, "UF"), clp = BuildPriceRanges(clpPrices, "CLP") },
+            totalProperties,
+            byType,
+            topNeighborhoods,
+            globalAverages     = globalAvgs,
+            priceDistribution  = new { uf = BuildPriceRanges(ufPrices, "UF"), clp = BuildPriceRanges(clpPrices, "CLP") },
             sources,
         });
     }
 
-    // GET /api/analytics/trends — Consume 1 crédito
+    // GET /api/analytics/trends
     [HttpGet("trends")]
     public async Task<IActionResult> GetTrends(
         [FromQuery] string? region = null, [FromQuery] string? city = null,
@@ -162,17 +218,17 @@ public class AnalyticsController : ControllerBase
             .GroupBy(b => new { b.LastRun!.Value.Year, b.LastRun!.Value.Month })
             .Select(g => new
             {
-                mes = $"{g.Key.Year}-{g.Key.Month:D2}",
+                mes      = $"{g.Key.Year}-{g.Key.Month:D2}",
                 exitosas = g.Count(b => b.Status == "completed"),
                 fallidas = g.Count(b => b.Status == "error"),
-                total = g.Count()
+                total    = g.Count()
             })
             .OrderBy(t => t.mes).ToList();
 
         return Ok(new { items = trends });
     }
 
-    // GET /api/analytics/compare — Consume 1 crédito
+    // GET /api/analytics/compare
     [HttpGet("compare")]
     public async Task<IActionResult> GetCompare(
         [FromQuery] string? region = null, [FromQuery] string? city = null,
@@ -183,16 +239,48 @@ public class AnalyticsController : ControllerBase
 
         var query = ApplyFilters(_context.Properties.AsQueryable(), region, city, neighborhood, propertyType);
 
-        var byType = await query.Where(p => p.PropertyType != null).GroupBy(p => p.PropertyType!)
+        // FIX: mismo patrón que GetMarket — agrupar por (type, currency)
+        var byTypeRaw = await query
+            .Where(p => p.PropertyType != null)
+            .GroupBy(p => new { p.PropertyType, Currency = p.Currency ?? "CLP" })
             .Select(g => new
             {
-                type = g.Key, count = g.Count(),
-                avgPrice = g.Where(p => p.Price > 0).Any() ? (double?)g.Where(p => p.Price > 0).Average(p => (double)p.Price!) : null,
-                avgBedrooms = g.Where(p => p.Bedrooms > 0).Any() ? (double?)g.Where(p => p.Bedrooms > 0).Average(p => (double)p.Bedrooms!) : null,
-                avgBathrooms = g.Where(p => p.Bathrooms > 0).Any() ? (double?)g.Where(p => p.Bathrooms > 0).Average(p => (double)p.Bathrooms!) : null,
-                avgArea = g.Where(p => p.Area > 0).Any() ? (double?)g.Where(p => p.Area > 0).Average(p => (double)p.Area!) : null,
+                type         = g.Key.PropertyType!,
+                currency     = g.Key.Currency,
+                count        = g.Count(),
+                avgPrice     = g.Where(p => p.Price > 0).Any()
+                                ? (double?)g.Where(p => p.Price > 0).Average(p => (double)p.Price!)
+                                : null,
+                avgBedrooms  = g.Where(p => p.Bedrooms > 0).Any()
+                                ? (double?)g.Where(p => p.Bedrooms > 0).Average(p => (double)p.Bedrooms!)
+                                : null,
+                avgBathrooms = g.Where(p => p.Bathrooms > 0).Any()
+                                ? (double?)g.Where(p => p.Bathrooms > 0).Average(p => (double)p.Bathrooms!)
+                                : null,
+                avgArea      = g.Where(p => p.Area > 0).Any()
+                                ? (double?)g.Where(p => p.Area > 0).Average(p => (double)p.Area!)
+                                : null,
             })
-            .OrderByDescending(g => g.count).ToListAsync();
+            .ToListAsync();
+
+        var byType = byTypeRaw
+            .GroupBy(g => g.type)
+            .Select(g =>
+            {
+                var dominant = g.OrderByDescending(x => x.count).First();
+                return new
+                {
+                    type         = dominant.type,
+                    currency     = dominant.currency,
+                    count        = g.Sum(x => x.count),
+                    avgPrice     = dominant.avgPrice,
+                    avgBedrooms  = dominant.avgBedrooms,
+                    avgBathrooms = dominant.avgBathrooms,
+                    avgArea      = dominant.avgArea,
+                };
+            })
+            .OrderByDescending(g => g.count)
+            .ToList();
 
         var sources = await _context.Bots.GroupBy(b => b.Source)
             .Select(g => new { name = g.Key, value = g.Sum(b => b.TotalScraped) }).ToListAsync();
@@ -203,7 +291,8 @@ public class AnalyticsController : ControllerBase
     // ── Helpers ───────────────────────────────────────────────────
 
     private static IQueryable<Inmobiscrap.Models.Property> ApplyFilters(
-        IQueryable<Inmobiscrap.Models.Property> q, string? region, string? city, string? neighborhood, string? propertyType)
+        IQueryable<Inmobiscrap.Models.Property> q,
+        string? region, string? city, string? neighborhood, string? propertyType)
     {
         if (!string.IsNullOrWhiteSpace(region))       q = q.Where(p => p.Region == region);
         if (!string.IsNullOrWhiteSpace(city))         q = q.Where(p => p.City == city);
@@ -217,12 +306,21 @@ public class AnalyticsController : ControllerBase
         if (prices.Count == 0) return Array.Empty<object>();
         var ranges = currency == "UF"
             ? new[] {
-                ("< 1.000", 0.0, 1000.0), ("1K - 2K", 1000.0, 2000.0), ("2K - 3K", 2000.0, 3000.0),
-                ("3K - 5K", 3000.0, 5000.0), ("5K - 8K", 5000.0, 8000.0), ("8K - 15K", 8000.0, 15000.0),
-                ("> 15K", 15000.0, double.MaxValue) }
+                ("< 1.000",   0.0,      1000.0),
+                ("1K - 2K",   1000.0,   2000.0),
+                ("2K - 3K",   2000.0,   3000.0),
+                ("3K - 5K",   3000.0,   5000.0),
+                ("5K - 8K",   5000.0,   8000.0),
+                ("8K - 15K",  8000.0,  15000.0),
+                ("> 15K",    15000.0,  double.MaxValue) }
             : new[] {
-                ("< 50M", 0.0, 50e6), ("50M - 80M", 50e6, 80e6), ("80M - 120M", 80e6, 120e6),
-                ("120M - 180M", 120e6, 180e6), ("180M - 300M", 180e6, 300e6), ("> 300M", 300e6, double.MaxValue) };
+                ("< 50M",        0.0,    50e6),
+                ("50M - 80M",   50e6,    80e6),
+                ("80M - 120M",  80e6,   120e6),
+                ("120M - 180M",120e6,   180e6),
+                ("180M - 300M",180e6,   300e6),
+                ("> 300M",     300e6,  double.MaxValue) };
+
         return ranges
             .Select(r => new { rango = r.Item1, cantidad = prices.Count(p => p >= r.Item2 && p < r.Item3) })
             .Where(r => r.cantidad > 0);
