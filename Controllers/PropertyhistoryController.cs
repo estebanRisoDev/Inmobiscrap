@@ -17,7 +17,6 @@ public class PropertyHistoryController : ControllerBase
     /// <summary>
     /// GET /api/properties/{id}/timeline
     /// Línea de tiempo completa: todos los snapshots de una propiedad.
-    /// Cada snapshot es una observación con los valores de ese momento.
     /// </summary>
     [HttpGet("{id}/timeline")]
     public async Task<IActionResult> GetTimeline(int id)
@@ -68,10 +67,10 @@ public class PropertyHistoryController : ControllerBase
                 property.ListingStatus,
                 property.PriceChangedAt,
             },
-            totalSnapshots = snapshots.Count,
-            snapshotsWithChanges = snapshots.Count(s => s.HasChanges),
-            firstSeen = snapshots.FirstOrDefault()?.ScrapedAt,
-            lastSeen = snapshots.LastOrDefault()?.ScrapedAt,
+            totalSnapshots           = snapshots.Count,
+            snapshotsWithChanges     = snapshots.Count(s => s.HasChanges),
+            firstSeen                = snapshots.FirstOrDefault()?.ScrapedAt,
+            lastSeen                 = snapshots.LastOrDefault()?.ScrapedAt,
             snapshots,
         });
     }
@@ -82,14 +81,14 @@ public class PropertyHistoryController : ControllerBase
     /// </summary>
     [HttpGet("price-changes")]
     public async Task<IActionResult> GetPriceChanges(
-        [FromQuery] int days = 30,
+        [FromQuery] int days  = 30,
         [FromQuery] int limit = 50)
     {
         var since = DateTime.UtcNow.AddDays(-days);
 
         var changes = await _context.Properties
             .Where(p => p.PriceChangedAt != null && p.PriceChangedAt >= since
-                     && p.PreviousPrice != null && p.Price != null)
+                     && p.PreviousPrice  != null && p.Price != null)
             .OrderByDescending(p => p.PriceChangedAt)
             .Take(limit)
             .Select(p => new
@@ -100,9 +99,9 @@ public class PropertyHistoryController : ControllerBase
                 p.Neighborhood,
                 p.PropertyType,
                 p.Currency,
-                currentPrice = p.Price,
+                currentPrice  = p.Price,
                 previousPrice = p.PreviousPrice,
-                priceChange = p.Price - p.PreviousPrice,
+                priceChange   = p.Price - p.PreviousPrice,
                 changePercent = p.PreviousPrice > 0
                     ? Math.Round((double)((p.Price - p.PreviousPrice) / p.PreviousPrice * 100), 1)
                     : 0,
@@ -114,24 +113,28 @@ public class PropertyHistoryController : ControllerBase
 
         return Ok(new
         {
-            period = $"Últimos {days} días",
-            total = changes.Count,
+            period         = $"Últimos {days} días",
+            total          = changes.Count,
             priceIncreases = changes.Count(c => c.priceChange > 0),
             priceDecreases = changes.Count(c => c.priceChange < 0),
-            items = changes,
+            items          = changes,
         });
     }
 
     /// <summary>
     /// GET /api/properties/tracking-stats
     /// Estadísticas generales del sistema de tracking.
+    ///
+    /// FIX: Retorna los campos que el dashboard frontend espera:
+    ///   - newProperties, priceChanges, delisted, unchanged
+    ///   - priceHistory: historial mensual desde PropertySnapshots (para el gráfico)
     /// </summary>
     [HttpGet("tracking-stats")]
     public async Task<IActionResult> GetTrackingStats()
     {
         var totalProperties = await _context.Properties.CountAsync();
         var totalSnapshots  = await _context.PropertySnapshots.LongCountAsync();
-        var tracked = await _context.Properties.CountAsync(p => p.TimesScraped > 1);
+        var tracked         = await _context.Properties.CountAsync(p => p.TimesScraped > 1);
         var withPriceChange = await _context.Properties.CountAsync(p => p.PreviousPrice != null);
 
         var recentSnapshots = await _context.PropertySnapshots
@@ -143,15 +146,87 @@ public class PropertyHistoryController : ControllerBase
                           && p.LastSeenAt < DateTime.UtcNow.AddDays(-7)
                           && p.TimesScraped > 1);
 
+        // ── Propiedades nuevas: primera vez vistas en los últimos 7 días ─────
+        var newProperties = await _context.Properties
+            .CountAsync(p => p.FirstSeenAt != null
+                          && p.FirstSeenAt >= DateTime.UtcNow.AddDays(-7));
+
+        // ── Sin cambios: vistas más de una vez pero sin ningún cambio ────────
+        var unchanged = await _context.PropertySnapshots
+            .Where(s => !s.HasChanges)
+            .Select(s => s.PropertyId)
+            .Distinct()
+            .CountAsync();
+
+        // ── Historial mensual de precios separado por moneda ─────────────────
+        // Agrupa por (año, mes, moneda) para nunca mezclar UF con CLP en los
+        // cálculos de min/avg/max. Antes se agrupaba sin moneda, lo que causaba
+        // que valores UF (ej: 3200) aparecieran como minPrice en meses CLP.
+        var rawPriceHistory = await _context.PropertySnapshots
+            .Where(s => s.Price.HasValue && s.Price > 0 && s.Currency != null)
+            .GroupBy(s => new { s.ScrapedAt.Year, s.ScrapedAt.Month, s.Currency })
+            .Select(g => new
+            {
+                Year     = g.Key.Year,
+                Month    = g.Key.Month,
+                Currency = g.Key.Currency,
+                AvgPrice = g.Average(s => (double)s.Price!),
+                MinPrice = g.Min(s => (double)s.Price!),
+                MaxPrice = g.Max(s => (double)s.Price!),
+                Count    = g.Count(),
+            })
+            .OrderBy(g => g.Year)
+            .ThenBy(g => g.Month)
+            .ToListAsync();
+
+        var priceHistoryCLP = rawPriceHistory
+            .Where(g => g.Currency == "CLP")
+            .Select(g => new
+            {
+                mes      = $"{g.Year}-{g.Month:D2}",
+                avgPrice = Math.Round(g.AvgPrice, 2),
+                minPrice = Math.Round(g.MinPrice, 2),
+                maxPrice = Math.Round(g.MaxPrice, 2),
+                count    = g.Count,
+            }).ToList();
+
+        var priceHistoryUF = rawPriceHistory
+            .Where(g => g.Currency == "UF")
+            .Select(g => new
+            {
+                mes      = $"{g.Year}-{g.Month:D2}",
+                avgPrice = Math.Round(g.AvgPrice, 2),
+                minPrice = Math.Round(g.MinPrice, 2),
+                maxPrice = Math.Round(g.MaxPrice, 2),
+                count    = g.Count,
+            }).ToList();
+
+        // priceHistory: fallback genérico (la moneda con más datos)
+        var priceHistory = priceHistoryCLP.Count >= priceHistoryUF.Count
+            ? priceHistoryCLP.Cast<object>().ToList()
+            : priceHistoryUF.Cast<object>().ToList();
+
         return Ok(new
         {
+            // ── Campos que el frontend usa en los KPI cards ────────────────
+            newProperties,                        // "Nuevas (última ejecución)"
+            priceChanges     = withPriceChange,   // "Cambios de precio detectados"
+            delisted,                             // "Despublicadas / eliminadas"
+            unchanged,                            // "Sin cambios"
+
+            // ── Historial mensual separado por moneda ──────────────────────
+            priceHistoryCLP,   // page.tsx línea 441: trackingStats?.priceHistoryCLP
+            priceHistoryUF,    // page.tsx línea 442: trackingStats?.priceHistoryUF
+            priceHistory,      // fallback genérico (la moneda con más datos)
+
+            // ── Stats adicionales (para otros usos) ───────────────────────
             totalProperties,
             totalSnapshots,
-            propertiesTracked = tracked,
+            propertiesTracked          = tracked,
             propertiesWithPriceChanges = withPriceChange,
-            snapshotsLast7Days = recentSnapshots,
-            possiblyDelisted = delisted,
-            avgSnapshotsPerProperty = totalProperties > 0
+            snapshotsLast7Days         = recentSnapshots,
+            possiblyDelisted           = delisted,
+            avgSnapshotsPerProperty    = totalProperties > 0
                 ? Math.Round((double)totalSnapshots / totalProperties, 1)
                 : 0,
         });
@@ -163,7 +238,7 @@ public class PropertyHistoryController : ControllerBase
     /// </summary>
     [HttpGet("delisted")]
     public async Task<IActionResult> GetDelisted(
-        [FromQuery] int days = 7,
+        [FromQuery] int days  = 7,
         [FromQuery] int limit = 50)
     {
         var cutoff = DateTime.UtcNow.AddDays(-days);

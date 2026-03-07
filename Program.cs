@@ -6,6 +6,7 @@ using Inmobiscrap.Hubs;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using Hangfire;
 using Hangfire.PostgreSql;
 using Amazon.BedrockRuntime;
@@ -63,6 +64,7 @@ builder.Services.AddAuthentication(options =>
         ClockSkew                = TimeSpan.Zero,
     };
 
+    // Soporte para SignalR: leer token desde query string
     options.Events = new JwtBearerEvents
     {
         OnMessageReceived = context =>
@@ -99,34 +101,48 @@ builder.Services.AddHangfire(cfg => cfg
 
 builder.Services.AddHangfireServer();
 
-// ── SERVICES ──────────────────────────────────────────────────────
+// ── SERVICES ──────────────────────────────────────────────────────────────────
 builder.Services.AddHttpClient();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<IBotLogBuffer, BotLogBuffer>();
 builder.Services.AddScoped<IScraperService, ScraperService>();
 builder.Services.AddScoped<IBotLogService, BotLogService>();
-builder.Services.AddScoped<IPropertyUpsertService, PropertyUpsertService>();  // ← AGREGAR
+builder.Services.AddScoped<IPropertyUpsertService, PropertyUpsertService>();
 builder.Services.AddScoped<ScrapingJob>();
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
+
+// ── SWAGGER con JWT Bearer ────────────────────────────────────────────────────
+// FIX: usar SecuritySchemeType.Http + Scheme "bearer" en vez de ApiKey.
+// Con esto el botón "Authorize 🔒" solo pide el token, sin prefijo "Bearer ".
 builder.Services.AddSwaggerGen(c =>
 {
-    c.AddSecurityDefinition("Bearer", new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+    c.SwaggerDoc("v1", new OpenApiInfo
     {
-        In          = Microsoft.OpenApi.Models.ParameterLocation.Header,
-        Description = "Ingresa: Bearer {token}",
-        Name        = "Authorization",
-        Type        = Microsoft.OpenApi.Models.SecuritySchemeType.ApiKey,
+        Title   = "Inmobiscrap API",
+        Version = "v1",
+        Description = "API de scraping inmobiliario. Para autenticarte: llama a /api/auth/login, copia el token y pégalo en el botón Authorize 🔒"
     });
-    c.AddSecurityRequirement(new Microsoft.OpenApi.Models.OpenApiSecurityRequirement
+
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Name         = "Authorization",
+        Type         = SecuritySchemeType.Http,   // ← Http, no ApiKey
+        Scheme       = "bearer",                  // ← lowercase "bearer"
+        BearerFormat = "JWT",
+        In           = ParameterLocation.Header,
+        Description  = "Pega tu JWT token aquí (sin el prefijo 'Bearer ').",
+    });
+
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
         {
-            new Microsoft.OpenApi.Models.OpenApiSecurityScheme
+            new OpenApiSecurityScheme
             {
-                Reference = new Microsoft.OpenApi.Models.OpenApiReference
+                Reference = new OpenApiReference
                 {
-                    Type = Microsoft.OpenApi.Models.ReferenceType.SecurityScheme,
+                    Type = ReferenceType.SecurityScheme,
                     Id   = "Bearer"
                 }
             },
@@ -157,7 +173,6 @@ using (var scope = app.Services.CreateScope())
 }
 
 // ── STARTUP BOT CLEANUP ───────────────────────────────────────────────────────
-// Resetea bots zombie que quedaron en running/stopping por un Docker restart
 using (var scope = app.Services.CreateScope())
 {
     try
@@ -190,10 +205,7 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
-
 // ── SUPERADMIN SEED ───────────────────────────────────────────────────────────
-// Si SUPERADMIN_EMAIL está configurado, promueve automáticamente al usuario
-// existente (si ya se registró) o lo marca para auto-promoción al login.
 using (var scope = app.Services.CreateScope())
 {
     try
@@ -232,17 +244,12 @@ using (var scope = app.Services.CreateScope())
 }
 
 // ── STARTUP HANGFIRE SYNC ─────────────────────────────────────────────────────
-// Sincroniza los jobs de Hangfire con el estado real de la BD.
-// Necesario porque Hangfire guarda los jobs en su propia tabla de PostgreSQL,
-// pero si un bot fue modificado mientras el servidor estaba caído, pueden
-// quedar desincronizados. Este bloque deja Hangfire como fuente de verdad
-// secundaria, siendo la BD la fuente primaria.
 using (var scope = app.Services.CreateScope())
 {
     try
     {
-        var db              = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        var recurringJobs   = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
+        var db            = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var recurringJobs = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
 
         var allBots = await db.Bots.ToListAsync();
 
@@ -255,7 +262,6 @@ using (var scope = app.Services.CreateScope())
 
             if (bot.IsActive && bot.ScheduleEnabled && !string.IsNullOrWhiteSpace(bot.CronExpression))
             {
-                // Registrar o actualizar job de Hangfire para este bot
                 recurringJobs.AddOrUpdate<ScrapingJob>(
                     jobId,
                     job => job.ExecuteBotAsync(bot.Id),
@@ -264,7 +270,6 @@ using (var scope = app.Services.CreateScope())
             }
             else
             {
-                // Eliminar job si el bot ya no debe estar programado
                 recurringJobs.RemoveIfExists(jobId);
                 removed++;
             }
@@ -282,7 +287,11 @@ using (var scope = app.Services.CreateScope())
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
-    app.UseSwaggerUI();
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/swagger/v1/swagger.json", "Inmobiscrap API v1");
+        c.DisplayRequestDuration();
+    });
     app.UseHangfireDashboard("/hangfire");
 }
 
@@ -297,7 +306,6 @@ app.MapControllers();
 app.MapHub<BotLogHub>("/hubs/botlogs");
 
 // ── RECURRING JOB GLOBAL ──────────────────────────────────────────────────────
-// Job global para bots sin schedule propio (idle/error sin cron configurado)
 using (var scope = app.Services.CreateScope())
 {
     var recurringJobs = scope.ServiceProvider.GetRequiredService<IRecurringJobManager>();
