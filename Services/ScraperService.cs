@@ -1108,15 +1108,29 @@ public class ScraperService : IScraperService
             var chunkProperties = await ProcessChunkWithBedrock(chunks[i], bot, modelId);
 
             int added = 0;
-            foreach (var prop in chunkProperties)
+        foreach (var prop in chunkProperties)
+        {
+         // Dedup key más robusto: normaliza título (lowercase, sin acentos,
+        // sin puntuación, colapsar espacios) para que variaciones menores
+        // del LLM entre chunks no generen duplicados.         
+        // Ej: "Edificio en Las Condes" vs "Edificio Las Condes" → misma key.
+            var normTitle = NormalizeForDedup(prop.Title);
+            var normUrl   = (prop.SourceUrl ?? "").Trim().ToLowerInvariant();
+            var normCity  = NormalizeForDedup(prop.City);
+            var normType  = NormalizeForDedup(prop.PropertyType);
+
+         // Key primaria: por URL (si existe)
+         // Key secundaria: por título + ciudad + tipo (sin URL)
+            var key = !string.IsNullOrEmpty(normUrl)
+             ? $"url:{normUrl}"
+             : $"text:{normTitle}|{normCity}|{normType}";
+
+            if (seenKeys.Add(key))
             {
-                var key = $"{prop.SourceUrl ?? ""}|{prop.Title ?? ""}|{prop.Price}";
-                if (seenKeys.Add(key))
-                {
-                    allProperties.Add(prop);
-                    added++;
-                }
-            }
+             allProperties.Add(prop);
+             added++;
+             }
+        }
 
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
                 $"✅ Chunk {i + 1}: {chunkProperties.Count} found, {added} unique added");
@@ -1304,6 +1318,22 @@ TEXTO:
                 Description  = "Mock data generated for testing."
             }
         };
+
+    /// <summary>
+    /// Normaliza texto para deduplicación en memoria: lowercase, sin acentos,
+    /// sin puntuación, espacios colapsados.
+    /// </summary>
+    private static string NormalizeForDedup(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        var s = text.Trim().ToLowerInvariant();
+        s = s.Replace("á", "a").Replace("é", "e").Replace("í", "i")
+             .Replace("ó", "o").Replace("ú", "u").Replace("ñ", "n")
+             .Replace("ü", "u");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"[^\w\s]", " ");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ").Trim();
+        return s;
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // DTOs internos para Bedrock

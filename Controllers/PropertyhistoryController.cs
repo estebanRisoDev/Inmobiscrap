@@ -42,6 +42,9 @@ public class PropertyHistoryController : ControllerBase
                 s.Area,
                 s.PropertyType,
                 s.Title,
+                s.Region,
+                s.City,
+                s.Neighborhood,
                 s.HasChanges,
                 s.ChangedFields,
             })
@@ -123,11 +126,6 @@ public class PropertyHistoryController : ControllerBase
 
     /// <summary>
     /// GET /api/properties/tracking-stats
-    /// Estadísticas generales del sistema de tracking.
-    ///
-    /// FIX: Retorna los campos que el dashboard frontend espera:
-    ///   - newProperties, priceChanges, delisted, unchanged
-    ///   - priceHistory: historial mensual desde PropertySnapshots (para el gráfico)
     /// </summary>
     [HttpGet("tracking-stats")]
     public async Task<IActionResult> GetTrackingStats()
@@ -146,22 +144,24 @@ public class PropertyHistoryController : ControllerBase
                           && p.LastSeenAt < DateTime.UtcNow.AddDays(-7)
                           && p.TimesScraped > 1);
 
-        // ── Propiedades nuevas: primera vez vistas en los últimos 7 días ─────
         var newProperties = await _context.Properties
             .CountAsync(p => p.FirstSeenAt != null
                           && p.FirstSeenAt >= DateTime.UtcNow.AddDays(-7));
 
-        // ── Sin cambios: vistas más de una vez pero sin ningún cambio ────────
-        var unchanged = await _context.PropertySnapshots
-            .Where(s => !s.HasChanges)
+        // "Sin cambios" = propiedades observadas más de una vez que NUNCA
+        // tuvieron ningún cambio detectado en ningún snapshot.
+        // La query anterior contaba propiedades con al menos un snapshot
+        // sin cambios — pero TODA propiedad tiene su primer snapshot con
+        // HasChanges=false, así que siempre daba el total.
+        var propertyIdsWithChanges = _context.PropertySnapshots
+            .Where(s => s.HasChanges)
             .Select(s => s.PropertyId)
-            .Distinct()
-            .CountAsync();
+            .Distinct();
 
-        // ── Historial mensual de precios separado por moneda ─────────────────
-        // Agrupa por (año, mes, moneda) para nunca mezclar UF con CLP en los
-        // cálculos de min/avg/max. Antes se agrupaba sin moneda, lo que causaba
-        // que valores UF (ej: 3200) aparecieran como minPrice en meses CLP.
+        var unchanged = await _context.Properties
+            .CountAsync(p => p.TimesScraped > 1
+                          && !propertyIdsWithChanges.Contains(p.Id));
+
         var rawPriceHistory = await _context.PropertySnapshots
             .Where(s => s.Price.HasValue && s.Price > 0 && s.Currency != null)
             .GroupBy(s => new { s.ScrapedAt.Year, s.ScrapedAt.Month, s.Currency })
@@ -201,25 +201,19 @@ public class PropertyHistoryController : ControllerBase
                 count    = g.Count,
             }).ToList();
 
-        // priceHistory: fallback genérico (la moneda con más datos)
         var priceHistory = priceHistoryCLP.Count >= priceHistoryUF.Count
             ? priceHistoryCLP.Cast<object>().ToList()
             : priceHistoryUF.Cast<object>().ToList();
 
         return Ok(new
         {
-            // ── Campos que el frontend usa en los KPI cards ────────────────
-            newProperties,                        // "Nuevas (última ejecución)"
-            priceChanges     = withPriceChange,   // "Cambios de precio detectados"
-            delisted,                             // "Despublicadas / eliminadas"
-            unchanged,                            // "Sin cambios"
-
-            // ── Historial mensual separado por moneda ──────────────────────
-            priceHistoryCLP,   // page.tsx línea 441: trackingStats?.priceHistoryCLP
-            priceHistoryUF,    // page.tsx línea 442: trackingStats?.priceHistoryUF
-            priceHistory,      // fallback genérico (la moneda con más datos)
-
-            // ── Stats adicionales (para otros usos) ───────────────────────
+            newProperties,
+            priceChanges     = withPriceChange,
+            delisted,
+            unchanged,
+            priceHistoryCLP,
+            priceHistoryUF,
+            priceHistory,
             totalProperties,
             totalSnapshots,
             propertiesTracked          = tracked,
@@ -233,117 +227,163 @@ public class PropertyHistoryController : ControllerBase
     }
 
     /// <summary>
-/// GET /api/properties/price-history?range=day|week|month&amp;currency=UF|CLP
-///
-/// Retorna historial de precios con granularidad configurable:
-///   - day   → agrupado por hora  (últimas 24h),  label = "HH:00"
-///   - week  → agrupado por día   (últimos 7 días), label = "Lun", "Mar"...
-///   - month → agrupado por día   (últimos 30 días), label = "01", "02"...
-/// </summary>
-/// <summary>
-/// GET /api/properties/price-history?range=day|week|month&amp;currency=UF|CLP
-///
-/// Retorna historial de precios con granularidad configurable.
-/// Los componentes de tiempo se devuelven por separado para que el frontend
-/// construya sus propios labels con la flexibilidad que necesite:
-///
-///   - day   → agrupado por hora  (últimas 24h),  hour != null
-///   - week  → agrupado por día   (últimos 7 días), hour = null
-///   - month → agrupado por día   (últimos 30 días), hour = null
-/// </summary>
-[HttpGet("price-history")]
-public async Task<IActionResult> GetPriceHistory(
-    [FromQuery] string  range    = "month",
-    [FromQuery] string? currency = null)
-{
-    var now = DateTime.UtcNow;
-
-    DateTime since = range switch
+    /// GET /api/properties/price-history?range=day|week|month
+    ///     &amp;currency=UF|CLP
+    ///     &amp;region=...&amp;city=...&amp;neighborhood=...&amp;propertyType=...
+    ///
+    /// FILTROS: Usa los campos desnormalizados del snapshot (Region, City,
+    /// Neighborhood, PropertyType). Para snapshots antiguos pre-migración
+    /// que no tienen esos campos, fallback a Property vía navegación.
+    ///
+    /// DEDUPLICACIÓN: Agrupa por (PropertyId, bucket temporal) y toma solo
+    /// el último snapshot por propiedad por bucket. Así una propiedad
+    /// scrapada N veces en la misma hora/día cuenta UNA sola vez y el
+    /// promedio refleja el precio real de cada propiedad, no el volumen
+    /// del scrape.
+    ///
+    ///   - day   → agrupado por hora  (últimas 24h)
+    ///   - week  → agrupado por día   (últimos 7 días)
+    ///   - month → agrupado por día   (últimos 30 días)
+    /// </summary>
+    [HttpGet("price-history")]
+    public async Task<IActionResult> GetPriceHistory(
+        [FromQuery] string  range        = "month",
+        [FromQuery] string? currency     = null,
+        [FromQuery] string? region       = null,
+        [FromQuery] string? city         = null,
+        [FromQuery] string? neighborhood = null,
+        [FromQuery] string? propertyType = null)
     {
-        "day"  => now.AddHours(-24),
-        "week" => now.AddDays(-7),
-        _      => now.AddDays(-30),   // month
-    };
+        var now = DateTime.UtcNow;
 
-    var query = _context.PropertySnapshots
-        .Where(s => s.Price.HasValue && s.Price > 0
-                 && s.ScrapedAt >= since);
-
-    if (!string.IsNullOrWhiteSpace(currency) && (currency == "UF" || currency == "CLP"))
-        query = query.Where(s => s.Currency == currency);
-
-    var raw = await query
-        .Select(s => new
+        DateTime since = range switch
         {
-            s.ScrapedAt,
-            Price    = (double)s.Price!,
-            Currency = s.Currency ?? "CLP",
-        })
-        .ToListAsync();
+            "day"  => now.AddHours(-24),
+            "week" => now.AddDays(-7),
+            _      => now.AddDays(-30),
+        };
 
-    if (raw.Count == 0)
-        return Ok(Array.Empty<object>());
+        // ── Query base ───────────────────────────────────────────────────────
+        var query = _context.PropertySnapshots
+            .Where(s => s.Price.HasValue && s.Price > 0
+                     && s.ScrapedAt >= since);
 
-    // Si no se especificó moneda, usar la dominante (más registros)
-    if (string.IsNullOrWhiteSpace(currency) || (currency != "UF" && currency != "CLP"))
-    {
-        var ufCount  = raw.Count(r => r.Currency == "UF");
-        var clpCount = raw.Count(r => r.Currency == "CLP");
-        var dominant = ufCount >= clpCount ? "UF" : "CLP";
-        raw = raw.Where(r => r.Currency == dominant).ToList();
-    }
+        // ── Filtros geográficos y de tipo ────────────────────────────────────
+        // Usa campos del snapshot; fallback a Property para datos antiguos.
+        if (!string.IsNullOrWhiteSpace(region))
+            query = query.Where(s =>
+                (s.Region != null && s.Region == region) ||
+                (s.Region == null && s.Property.Region == region));
 
-    // ── Agrupar y proyectar ────────────────────────────────────────
-    IEnumerable<object> result;
+        if (!string.IsNullOrWhiteSpace(city))
+            query = query.Where(s =>
+                (s.City != null && s.City == city) ||
+                (s.City == null && s.Property.City == city));
 
-    if (range == "day")
-    {
-        // Agrupar por hora exacta (floor a la hora en UTC)
-        result = raw
-            .GroupBy(r => new DateTime(r.ScrapedAt.Year, r.ScrapedAt.Month, r.ScrapedAt.Day,
-                                       r.ScrapedAt.Hour, 0, 0, DateTimeKind.Utc))
-            .OrderBy(g => g.Key)
-            .Select(g => (object)new
+        if (!string.IsNullOrWhiteSpace(neighborhood))
+            query = query.Where(s =>
+                (s.Neighborhood != null && s.Neighborhood == neighborhood) ||
+                (s.Neighborhood == null && s.Property.Neighborhood == neighborhood));
+
+        if (!string.IsNullOrWhiteSpace(propertyType))
+            query = query.Where(s =>
+                (s.PropertyType != null && s.PropertyType == propertyType) ||
+                (s.PropertyType == null && s.Property.PropertyType == propertyType));
+
+        // ── Filtro de moneda ─────────────────────────────────────────────────
+        if (!string.IsNullOrWhiteSpace(currency) && (currency == "UF" || currency == "CLP"))
+            query = query.Where(s => s.Currency == currency);
+
+        // ── Materializar ─────────────────────────────────────────────────────
+        var raw = await query
+            .Select(s => new
             {
-                year      = g.Key.Year,
-                month     = g.Key.Month,
-                day       = g.Key.Day,
-                hour      = (int?)g.Key.Hour,
-                dayOfWeek = (int)g.Key.DayOfWeek,   // 0=Dom … 6=Sáb
-                avgPrice  = Math.Round(g.Average(r => r.Price), 2),
-                minPrice  = Math.Round(g.Min(r => r.Price), 2),
-                maxPrice  = Math.Round(g.Max(r => r.Price), 2),
-                count     = g.Count(),
-            });
+                s.PropertyId,
+                s.ScrapedAt,
+                Price    = (double)s.Price!,
+                Currency = s.Currency ?? "CLP",
+            })
+            .ToListAsync();
+
+        if (raw.Count == 0)
+            return Ok(Array.Empty<object>());
+
+        // ── Auto-detectar moneda dominante ────────────────────────────────────
+        if (string.IsNullOrWhiteSpace(currency) || (currency != "UF" && currency != "CLP"))
+        {
+            var ufCount  = raw.Count(r => r.Currency == "UF");
+            var clpCount = raw.Count(r => r.Currency == "CLP");
+            var dominant = ufCount >= clpCount ? "UF" : "CLP";
+            raw = raw.Where(r => r.Currency == dominant).ToList();
+        }
+
+        // ══════════════════════════════════════════════════════════════════════
+        // DEDUPLICACIÓN
+        //
+        // Problema: si un bot scrapea 48 propiedades a las 20:15, el endpoint
+        // sin deduplicar devuelve avgPrice = promedio de esas 48 propiedades
+        // para la hora 20:00. Eso no es "evolución del precio" sino
+        // "distribución de precios del scrape".
+        //
+        // Solución: por cada (PropertyId, bucket), quedarse con el último
+        // snapshot. Así cada propiedad pesa 1 vez por bucket temporal.
+        // ══════════════════════════════════════════════════════════════════════
+
+        IEnumerable<object> result;
+
+        if (range == "day")
+        {
+            var deduped = raw
+                .GroupBy(r => new { r.PropertyId, r.ScrapedAt.Year, r.ScrapedAt.Month, r.ScrapedAt.Day, r.ScrapedAt.Hour })
+                .Select(g => g.OrderByDescending(r => r.ScrapedAt).First())
+                .ToList();
+
+            result = deduped
+                .GroupBy(r => new DateTime(r.ScrapedAt.Year, r.ScrapedAt.Month, r.ScrapedAt.Day,
+                                           r.ScrapedAt.Hour, 0, 0, DateTimeKind.Utc))
+                .OrderBy(g => g.Key)
+                .Select(g => (object)new
+                {
+                    year      = g.Key.Year,
+                    month     = g.Key.Month,
+                    day       = g.Key.Day,
+                    hour      = (int?)g.Key.Hour,
+                    dayOfWeek = (int)g.Key.DayOfWeek,
+                    avgPrice  = Math.Round(g.Average(r => r.Price), 2),
+                    minPrice  = Math.Round(g.Min(r => r.Price), 2),
+                    maxPrice  = Math.Round(g.Max(r => r.Price), 2),
+                    count     = g.Count(),
+                });
+        }
+        else
+        {
+            var deduped = raw
+                .GroupBy(r => new { r.PropertyId, r.ScrapedAt.Year, r.ScrapedAt.Month, r.ScrapedAt.Day })
+                .Select(g => g.OrderByDescending(r => r.ScrapedAt).First())
+                .ToList();
+
+            result = deduped
+                .GroupBy(r => r.ScrapedAt.Date)
+                .OrderBy(g => g.Key)
+                .Select(g => (object)new
+                {
+                    year      = g.Key.Year,
+                    month     = g.Key.Month,
+                    day       = g.Key.Day,
+                    hour      = (int?)null,
+                    dayOfWeek = (int)g.Key.DayOfWeek,
+                    avgPrice  = Math.Round(g.Average(r => r.Price), 2),
+                    minPrice  = Math.Round(g.Min(r => r.Price), 2),
+                    maxPrice  = Math.Round(g.Max(r => r.Price), 2),
+                    count     = g.Count(),
+                });
+        }
+
+        return Ok(result.ToList());
     }
-    else
-    {
-        // week y month: agrupar por fecha (día completo)
-        result = raw
-            .GroupBy(r => r.ScrapedAt.Date)
-            .OrderBy(g => g.Key)
-            .Select(g => (object)new
-            {
-                year      = g.Key.Year,
-                month     = g.Key.Month,
-                day       = g.Key.Day,
-                hour      = (int?)null,
-                dayOfWeek = (int)g.Key.DayOfWeek,   // 0=Dom … 6=Sáb
-                avgPrice  = Math.Round(g.Average(r => r.Price), 2),
-                minPrice  = Math.Round(g.Min(r => r.Price), 2),
-                maxPrice  = Math.Round(g.Max(r => r.Price), 2),
-                count     = g.Count(),
-            });
-    }
-
-    return Ok(result.ToList());
-}
-
-
 
     /// <summary>
     /// GET /api/properties/delisted?days=7
-    /// Propiedades que dejaron de aparecer en los scrapes.
     /// </summary>
     [HttpGet("delisted")]
     public async Task<IActionResult> GetDelisted(

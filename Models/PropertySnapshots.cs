@@ -11,6 +11,7 @@ namespace Inmobiscrap.Models;
 ///   - Ver cuántos días estuvo listada
 ///   - Detectar cuándo cambió algo
 ///   - Detectar cuándo dejó de aparecer (posible venta)
+///   - Filtrar historial por ubicación sin necesitar JOIN con Property
 /// </summary>
 public class PropertySnapshot
 {
@@ -35,6 +36,16 @@ public class PropertySnapshot
     public decimal? Area { get; set; }
     public string?  PropertyType { get; set; }
     public string?  Title { get; set; }
+
+    // ── Ubicación (desnormalizada desde Property para consultas rápidas) ──────
+    /// <summary>Región al momento del scrape</summary>
+    public string? Region { get; set; }
+
+    /// <summary>Ciudad al momento del scrape</summary>
+    public string? City { get; set; }
+
+    /// <summary>Comuna / barrio al momento del scrape</summary>
+    public string? Neighborhood { get; set; }
 
     // ── Metadata ──────────────────────────────────────────────────────────────
     /// <summary>¿Cambió algo respecto al snapshot anterior?</summary>

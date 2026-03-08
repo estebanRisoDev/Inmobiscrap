@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Inmobiscrap.Data;
 using Inmobiscrap.Models;
@@ -21,17 +22,12 @@ public interface IPropertyUpsertService
 
 /// <summary>
 /// Cada vez que un bot observa una propiedad:
-///   1. Busca si ya existe por fingerprint (SHA256 de SourceUrl normalizada).
-///   2. Fallback: busca por SourceUrl directamente (resistente a variaciones de URL).
-///   3. Si NO existe → la crea + primer snapshot (ambos guardados atómicamente).
-///   4. Si SÍ existe → SIEMPRE crea un nuevo snapshot.
-///      4a. Compara con los valores actuales de Property.
-///      4b. Si algo cambió → marca snapshot.HasChanges = true,
-///          actualiza Property con los nuevos valores.
-///      4c. Si nada cambió → snapshot.HasChanges = false.
-///
-/// Cada llamada a UpsertPropertyAsync es completamente autónoma:
-/// llama SaveChangesAsync internamente para garantizar atomicidad.
+///   1. Busca por fingerprint (SHA256 de SourceUrl normalizada).
+///   2. Fallback: busca por SourceUrl directamente.
+///   3. Fallback: busca por título + ciudad + tipo normalizado (para
+///      propiedades sin URL que el LLM extrajo con variaciones menores).
+///   4. Si NO existe → la crea + primer snapshot.
+///   5. Si SÍ existe → SIEMPRE crea un nuevo snapshot.
 /// </summary>
 public class PropertyUpsertService : IPropertyUpsertService
 {
@@ -46,18 +42,38 @@ public class PropertyUpsertService : IPropertyUpsertService
         _logger = logger;
     }
 
+    // ── Normalización de texto ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Normaliza un texto para comparación: lowercase, trim, colapsar espacios,
+    /// quitar acentos, quitar puntuación.
+    /// "  Edificio en Las Condes  " → "edificio en las condes"
+    /// "Edificio, Las Condes!" → "edificio las condes"
+    /// </summary>
+    private static string NormalizeText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        var s = text.Trim().ToLowerInvariant();
+        // Quitar acentos comunes del español
+        s = s.Replace("á", "a").Replace("é", "e").Replace("í", "i")
+             .Replace("ó", "o").Replace("ú", "u").Replace("ñ", "n")
+             .Replace("ü", "u");
+        // Quitar puntuación y caracteres especiales
+        s = Regex.Replace(s, @"[^\w\s]", " ");
+        // Colapsar espacios múltiples
+        s = Regex.Replace(s, @"\s+", " ").Trim();
+        return s;
+    }
+
     // ── Fingerprint ───────────────────────────────────────────────────────────
 
     public string GenerateFingerprint(Property property)
     {
-        // Fuente primaria: SourceUrl normalizada (más confiable entre runs)
-        // Fallback: Title + Address + City
         var raw = !string.IsNullOrWhiteSpace(property.SourceUrl)
             ? property.SourceUrl.Trim().ToLowerInvariant()
-            : $"{(property.Title   ?? "").Trim()}|" +
-              $"{(property.Address ?? "").Trim()}|" +
-              $"{(property.City    ?? "").Trim()}"
-                .ToLowerInvariant();
+            : $"{NormalizeText(property.Title)}|" +
+              $"{NormalizeText(property.Address)}|" +
+              $"{NormalizeText(property.City)}";
 
         // Normalizar URLs: quitar query params, fragments y trailing slashes
         if (raw.StartsWith("http"))
@@ -74,10 +90,6 @@ public class PropertyUpsertService : IPropertyUpsertService
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
-    /// <summary>
-    /// Normaliza una URL para comparación directa (quita query params, fragment,
-    /// trailing slashes y convierte a lowercase).
-    /// </summary>
     private static string NormalizeUrl(string url)
     {
         url = url.Trim().ToLowerInvariant().TrimEnd('/');
@@ -105,14 +117,10 @@ public class PropertyUpsertService : IPropertyUpsertService
             .FirstOrDefaultAsync(p => p.Fingerprint == fingerprint);
 
         // ── Paso 2: Fallback por SourceUrl normalizada ────────────────────────
-        // Necesario cuando Bedrock devuelve URLs con pequeñas variaciones entre
-        // runs (query params, mayúsculas, trailing slash) que cambian el fingerprint.
         if (existing == null && !string.IsNullOrWhiteSpace(scraped.SourceUrl))
         {
             var normalizedUrl = NormalizeUrl(scraped.SourceUrl);
 
-            // FIX CS8790: calcular el prefijo FUERA del expression tree
-            // (los slices [..n] no pueden traducirse a SQL por EF Core)
             var searchPrefix = normalizedUrl.Length > 30
                 ? normalizedUrl[..30]
                 : normalizedUrl;
@@ -125,13 +133,81 @@ public class PropertyUpsertService : IPropertyUpsertService
                 !string.IsNullOrWhiteSpace(p.SourceUrl) &&
                 NormalizeUrl(p.SourceUrl) == normalizedUrl);
 
-            // Corregir el fingerprint si la URL era la misma pero estaba mal guardada
             if (existing != null && existing.Fingerprint != fingerprint)
             {
                 _logger.LogInformation(
                     "Fingerprint corregido para propiedad {Id}: {OldFp} → {NewFp}",
                     existing.Id, existing.Fingerprint, fingerprint);
                 existing.Fingerprint = fingerprint;
+            }
+        }
+
+        // ── Paso 3: Fallback por título + ciudad + tipo (sin SourceUrl) ───────
+        // Cuando Bedrock no encontró la URL individual y el fingerprint se basa
+        // en Title|Address|City, variaciones menores del LLM entre chunks
+        // generan fingerprints distintos. Este fallback compara los textos
+        // normalizados (sin acentos, sin puntuación, lowercase).
+        if (existing == null)
+        {
+            var normTitle = NormalizeText(scraped.Title);
+            var normCity  = NormalizeText(scraped.City);
+            var normType  = NormalizeText(scraped.PropertyType);
+
+            if (normTitle.Length > 3)
+            {
+                // Buscar candidatos que compartan ciudad y tipo (si los tiene)
+                var candidateQuery = _context.Properties.AsQueryable();
+
+                if (!string.IsNullOrEmpty(normCity))
+                    candidateQuery = candidateQuery.Where(p => p.City != null);
+
+                if (!string.IsNullOrEmpty(normType))
+                    candidateQuery = candidateQuery.Where(p => p.PropertyType != null);
+
+                // Traer un set acotado para comparar en memoria
+                // Usar un prefijo del título para filtrar en SQL
+                var titlePrefix = normTitle.Length > 10 ? scraped.Title!.Substring(0, 10) : scraped.Title!;
+                var candidates = await candidateQuery
+                    .Where(p => p.Title != null && p.Title.ToLower().Contains(titlePrefix.ToLower()))
+                    .Take(50)
+                    .ToListAsync();
+
+                existing = candidates.FirstOrDefault(p =>
+                {
+                    var pTitle = NormalizeText(p.Title);
+                    var pCity  = NormalizeText(p.City);
+                    var pType  = NormalizeText(p.PropertyType);
+
+                    // Título debe ser muy similar (igual normalizado o uno contiene al otro)
+                    var titleMatch = pTitle == normTitle
+                                  || pTitle.Contains(normTitle)
+                                  || normTitle.Contains(pTitle);
+
+                    if (!titleMatch) return false;
+
+                    // Ciudad debe coincidir si ambas existen
+                    if (!string.IsNullOrEmpty(normCity) && !string.IsNullOrEmpty(pCity)
+                        && pCity != normCity)
+                        return false;
+
+                    // Tipo debe coincidir si ambos existen
+                    if (!string.IsNullOrEmpty(normType) && !string.IsNullOrEmpty(pType)
+                        && pType != normType)
+                        return false;
+
+                    return true;
+                });
+
+                if (existing != null)
+                {
+                    _logger.LogInformation(
+                        "Propiedad {Id} encontrada por título fuzzy: '{ExistingTitle}' ≈ '{ScrapedTitle}'",
+                        existing.Id, existing.Title, scraped.Title);
+
+                    // Actualizar fingerprint para futuras búsquedas directas
+                    if (existing.Fingerprint != fingerprint)
+                        existing.Fingerprint = fingerprint;
+                }
             }
         }
 
@@ -146,7 +222,7 @@ public class PropertyUpsertService : IPropertyUpsertService
             scraped.ListingStatus = "active";
 
             _context.Properties.Add(scraped);
-            await _context.SaveChangesAsync(); // Necesario para obtener el Id generado
+            await _context.SaveChangesAsync();
 
             _context.PropertySnapshots.Add(new PropertySnapshot
             {
@@ -160,11 +236,14 @@ public class PropertyUpsertService : IPropertyUpsertService
                 Area          = scraped.Area,
                 PropertyType  = scraped.PropertyType,
                 Title         = scraped.Title,
-                HasChanges    = false,  // Primer snapshot, no hay "cambio" aún
+                Region        = scraped.Region,
+                City          = scraped.City,
+                Neighborhood  = scraped.Neighborhood,
+                HasChanges    = false,
                 ChangedFields = null,
             });
 
-            await _context.SaveChangesAsync(); // Guardar snapshot
+            await _context.SaveChangesAsync();
             return UpsertResult.New;
         }
 
@@ -177,7 +256,6 @@ public class PropertyUpsertService : IPropertyUpsertService
 
         var changedFields = new List<string>();
 
-        // Precio: solo comparar si ambos tienen precio válido
         if (scraped.Price.HasValue    && scraped.Price > 0
             && existing.Price.HasValue && existing.Price > 0
             && scraped.Price != existing.Price)
@@ -237,14 +315,13 @@ public class PropertyUpsertService : IPropertyUpsertService
             existing.PropertyType = scraped.PropertyType;
         }
 
-        // Enriquecer campos que antes eran null (nunca sobreescribir con null)
+        // Enriquecer campos que antes eran null
         if (string.IsNullOrEmpty(existing.Region)       && !string.IsNullOrEmpty(scraped.Region))       existing.Region       = scraped.Region;
         if (string.IsNullOrEmpty(existing.Neighborhood) && !string.IsNullOrEmpty(scraped.Neighborhood)) existing.Neighborhood = scraped.Neighborhood;
         if (string.IsNullOrEmpty(existing.Address)      && !string.IsNullOrEmpty(scraped.Address))      existing.Address      = scraped.Address;
         if (string.IsNullOrEmpty(existing.Description)  && !string.IsNullOrEmpty(scraped.Description))  existing.Description  = scraped.Description;
+        if (string.IsNullOrEmpty(existing.SourceUrl)    && !string.IsNullOrEmpty(scraped.SourceUrl))    existing.SourceUrl    = scraped.SourceUrl;
 
-        // ── SIEMPRE crear snapshot — sea que haya cambios o no ────────────────
-        // Esto es lo que genera el historial real de observaciones
         var hasChanges = changedFields.Count > 0;
 
         _context.PropertySnapshots.Add(new PropertySnapshot
@@ -252,7 +329,6 @@ public class PropertyUpsertService : IPropertyUpsertService
             PropertyId    = existing.Id,
             BotId         = botId,
             ScrapedAt     = now,
-            // Guardar los valores ACTUALES (ya actualizados si hubo cambios)
             Price         = existing.Price,
             Currency      = existing.Currency,
             Bedrooms      = existing.Bedrooms,
@@ -260,11 +336,13 @@ public class PropertyUpsertService : IPropertyUpsertService
             Area          = existing.Area,
             PropertyType  = existing.PropertyType,
             Title         = existing.Title,
+            Region        = existing.Region,
+            City          = existing.City,
+            Neighborhood  = existing.Neighborhood,
             HasChanges    = hasChanges,
             ChangedFields = hasChanges ? string.Join(",", changedFields) : null,
         });
 
-        // Guardar propiedad actualizada + snapshot en una sola transacción
         await _context.SaveChangesAsync();
 
         return hasChanges ? UpsertResult.Updated : UpsertResult.Unchanged;

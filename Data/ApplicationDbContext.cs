@@ -58,6 +58,11 @@ public class ApplicationDbContext : DbContext
             entity.Property(s => s.HasChanges).HasDefaultValue(false);
             entity.Property(s => s.ChangedFields).HasMaxLength(200);
 
+            // ── Ubicación desnormalizada (nuevo) ──────────────────────────────
+            entity.Property(s => s.Region).HasMaxLength(100);
+            entity.Property(s => s.City).HasMaxLength(100);
+            entity.Property(s => s.Neighborhood).HasMaxLength(200);
+
             entity.HasOne(s => s.Property)
                   .WithMany(p => p.Snapshots)
                   .HasForeignKey(s => s.PropertyId)
@@ -69,6 +74,12 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(s => s.BotId).HasDatabaseName("IX_Snapshots_BotId");
             entity.HasIndex(s => new { s.PropertyId, s.ScrapedAt })
                   .HasDatabaseName("IX_Snapshots_Property_Date");
+
+            // ── Índices nuevos para filtros por ubicación en price-history ────
+            entity.HasIndex(s => s.City).HasDatabaseName("IX_Snapshots_City");
+            entity.HasIndex(s => s.Region).HasDatabaseName("IX_Snapshots_Region");
+            entity.HasIndex(s => new { s.ScrapedAt, s.Currency })
+                  .HasDatabaseName("IX_Snapshots_ScrapedAt_Currency");
         });
 
         // ============ BOT ============
