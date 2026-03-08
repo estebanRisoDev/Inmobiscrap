@@ -233,6 +233,115 @@ public class PropertyHistoryController : ControllerBase
     }
 
     /// <summary>
+/// GET /api/properties/price-history?range=day|week|month&amp;currency=UF|CLP
+///
+/// Retorna historial de precios con granularidad configurable:
+///   - day   → agrupado por hora  (últimas 24h),  label = "HH:00"
+///   - week  → agrupado por día   (últimos 7 días), label = "Lun", "Mar"...
+///   - month → agrupado por día   (últimos 30 días), label = "01", "02"...
+/// </summary>
+/// <summary>
+/// GET /api/properties/price-history?range=day|week|month&amp;currency=UF|CLP
+///
+/// Retorna historial de precios con granularidad configurable.
+/// Los componentes de tiempo se devuelven por separado para que el frontend
+/// construya sus propios labels con la flexibilidad que necesite:
+///
+///   - day   → agrupado por hora  (últimas 24h),  hour != null
+///   - week  → agrupado por día   (últimos 7 días), hour = null
+///   - month → agrupado por día   (últimos 30 días), hour = null
+/// </summary>
+[HttpGet("price-history")]
+public async Task<IActionResult> GetPriceHistory(
+    [FromQuery] string  range    = "month",
+    [FromQuery] string? currency = null)
+{
+    var now = DateTime.UtcNow;
+
+    DateTime since = range switch
+    {
+        "day"  => now.AddHours(-24),
+        "week" => now.AddDays(-7),
+        _      => now.AddDays(-30),   // month
+    };
+
+    var query = _context.PropertySnapshots
+        .Where(s => s.Price.HasValue && s.Price > 0
+                 && s.ScrapedAt >= since);
+
+    if (!string.IsNullOrWhiteSpace(currency) && (currency == "UF" || currency == "CLP"))
+        query = query.Where(s => s.Currency == currency);
+
+    var raw = await query
+        .Select(s => new
+        {
+            s.ScrapedAt,
+            Price    = (double)s.Price!,
+            Currency = s.Currency ?? "CLP",
+        })
+        .ToListAsync();
+
+    if (raw.Count == 0)
+        return Ok(Array.Empty<object>());
+
+    // Si no se especificó moneda, usar la dominante (más registros)
+    if (string.IsNullOrWhiteSpace(currency) || (currency != "UF" && currency != "CLP"))
+    {
+        var ufCount  = raw.Count(r => r.Currency == "UF");
+        var clpCount = raw.Count(r => r.Currency == "CLP");
+        var dominant = ufCount >= clpCount ? "UF" : "CLP";
+        raw = raw.Where(r => r.Currency == dominant).ToList();
+    }
+
+    // ── Agrupar y proyectar ────────────────────────────────────────
+    IEnumerable<object> result;
+
+    if (range == "day")
+    {
+        // Agrupar por hora exacta (floor a la hora en UTC)
+        result = raw
+            .GroupBy(r => new DateTime(r.ScrapedAt.Year, r.ScrapedAt.Month, r.ScrapedAt.Day,
+                                       r.ScrapedAt.Hour, 0, 0, DateTimeKind.Utc))
+            .OrderBy(g => g.Key)
+            .Select(g => (object)new
+            {
+                year      = g.Key.Year,
+                month     = g.Key.Month,
+                day       = g.Key.Day,
+                hour      = (int?)g.Key.Hour,
+                dayOfWeek = (int)g.Key.DayOfWeek,   // 0=Dom … 6=Sáb
+                avgPrice  = Math.Round(g.Average(r => r.Price), 2),
+                minPrice  = Math.Round(g.Min(r => r.Price), 2),
+                maxPrice  = Math.Round(g.Max(r => r.Price), 2),
+                count     = g.Count(),
+            });
+    }
+    else
+    {
+        // week y month: agrupar por fecha (día completo)
+        result = raw
+            .GroupBy(r => r.ScrapedAt.Date)
+            .OrderBy(g => g.Key)
+            .Select(g => (object)new
+            {
+                year      = g.Key.Year,
+                month     = g.Key.Month,
+                day       = g.Key.Day,
+                hour      = (int?)null,
+                dayOfWeek = (int)g.Key.DayOfWeek,   // 0=Dom … 6=Sáb
+                avgPrice  = Math.Round(g.Average(r => r.Price), 2),
+                minPrice  = Math.Round(g.Min(r => r.Price), 2),
+                maxPrice  = Math.Round(g.Max(r => r.Price), 2),
+                count     = g.Count(),
+            });
+    }
+
+    return Ok(result.ToList());
+}
+
+
+
+    /// <summary>
     /// GET /api/properties/delisted?days=7
     /// Propiedades que dejaron de aparecer en los scrapes.
     /// </summary>
