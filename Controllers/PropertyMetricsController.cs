@@ -266,7 +266,10 @@ public class PropertyMetricsController : ControllerBase
                 p.SourceUrl,
                 daysOnMarket = p.PublicationDate.HasValue
                     ? (int?)Math.Round((DateTime.UtcNow - p.PublicationDate.Value).TotalDays)
-                    : null,
+                    : p.FirstSeenAt.HasValue
+                        ? (int?)Math.Round((DateTime.UtcNow - p.FirstSeenAt.Value).TotalDays)
+                        : null,
+                daysOnMarketSource = p.PublicationDate.HasValue ? "publicationDate" : p.FirstSeenAt.HasValue ? "firstSeenAt" : null,
                 pricePerSqm = p.Price > 0 && p.Area > 0
                     ? (decimal?)Math.Round(p.Price.Value / p.Area.Value, 0)
                     : null,
@@ -327,7 +330,10 @@ public class PropertyMetricsController : ControllerBase
                 p.PriceChangedAt,
                 daysOnMarket = p.PublicationDate.HasValue
                     ? (int?)Math.Round((DateTime.UtcNow - p.PublicationDate.Value).TotalDays)
-                    : null,
+                    : p.FirstSeenAt.HasValue
+                        ? (int?)Math.Round((DateTime.UtcNow - p.FirstSeenAt.Value).TotalDays)
+                        : null,
+                daysOnMarketSource = p.PublicationDate.HasValue ? "publicationDate" : p.FirstSeenAt.HasValue ? "firstSeenAt" : null,
                 pricePerSqm = p.Price > 0 && p.Area > 0
                     ? (decimal?)Math.Round(p.Price.Value / p.Area.Value, 0)
                     : null,

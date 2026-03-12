@@ -22,7 +22,7 @@ public interface IPropertyUpsertService
 
 /// <summary>
 /// Cada vez que un bot observa una propiedad:
-///   1. Busca por fingerprint (SHA256 de SourceUrl normalizada).
+///   1. Busca por fingerprint (SHA256 de SourceUrl normalizada, o Title|City|PropertyType si no hay URL).
 ///   2. Fallback: busca por SourceUrl directamente.
 ///   3. Fallback: busca por título + ciudad + tipo normalizado (para
 ///      propiedades sin URL que el LLM extrajo con variaciones menores).
@@ -72,8 +72,10 @@ public class PropertyUpsertService : IPropertyUpsertService
         var raw = !string.IsNullOrWhiteSpace(property.SourceUrl)
             ? property.SourceUrl.Trim().ToLowerInvariant()
             : $"{NormalizeText(property.Title)}|" +
-              $"{NormalizeText(property.Address)}|" +
-              $"{NormalizeText(property.City)}";
+              $"{NormalizeText(property.City)}|" +
+              $"{NormalizeText(property.PropertyType)}|" +
+              $"{property.Bedrooms ?? 0}|" +
+              $"{property.Area ?? 0}";
 
         // Normalizar URLs: quitar query params, fragments y trailing slashes
         if (raw.StartsWith("http"))

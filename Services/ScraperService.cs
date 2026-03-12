@@ -1042,10 +1042,10 @@ public class ScraperService : IScraperService
 
     /// <summary>
     /// Divide el texto en chunks respetando separadores naturales.
-    /// Chunk size más grande (40K) porque ya no pre-filtramos tan agresivamente
-    /// y necesitamos darle más contexto al LLM.
+    /// Chunk size de 20K para evitar que el output JSON supere el límite de tokens de Bedrock
+    /// (el JSON de salida puede ser más grande que el input por overhead de estructura).
     /// </summary>
-    private static IEnumerable<string> ChunkText(string text, int maxChunkSize = 40_000)
+    private static IEnumerable<string> ChunkText(string text, int maxChunkSize = 10_000)
     {
         if (text.Length <= maxChunkSize)
         {
@@ -1085,7 +1085,7 @@ public class ScraperService : IScraperService
         var modelId = Environment.GetEnvironmentVariable("BEDROCK_MODEL_ID")
             ?? "us.anthropic.claude-3-5-sonnet-20241022-v2:0";
 
-        var chunks = ChunkText(compactText, maxChunkSize: 40_000).ToList();
+        var chunks = ChunkText(compactText, maxChunkSize: 10_000).ToList();
         await _botLogService.LogInfoAsync(bot.Id, bot.Name,
             $"📦 Content split into {chunks.Count} chunk(s) (model: {modelId})");
 
@@ -1174,6 +1174,8 @@ Reglas:
 - sourceUrl debe ser la URL específica de la propiedad, no la URL general del sitio
 - Si no encuentras una URL individual para una propiedad, deja sourceUrl como null
 - price debe ser solo el número (ej: 150000000 para $150.000.000, o 4500 para UF 4.500)
+- Cuando un campo tiene un rango de valores (ej: 33 - 57 m2, 1 a 2 dormitorios, 2 a 3 baños, Desde UF 2.902 hasta UF 4.500), usa siempre el valor MAS ALTO del rango
+- Para precios con Desde X sin valor maximo, usa el valor indicado (X)
 - Incluye TODAS las propiedades que veas, no omitas ninguna
 - Si no encuentras ninguna propiedad, responde con un array vacío
 

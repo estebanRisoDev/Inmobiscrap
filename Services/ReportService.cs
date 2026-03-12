@@ -48,7 +48,12 @@ public class ReportService : IReportService
         if (properties.Count < 2)
             throw new InvalidOperationException("Se necesitan al menos 2 propiedades para comparar.");
 
-        var tex = BuildComparisonLatex(properties);
+        var snapshots = await _context.PropertySnapshots
+            .Where(s => propertyIds.Contains(s.PropertyId) && s.Price.HasValue && s.Price > 0)
+            .OrderBy(s => s.ScrapedAt)
+            .ToListAsync();
+
+        var tex = BuildComparisonLatex(properties, snapshots);
         return await CompileLatexAsync(tex);
     }
 
@@ -418,7 +423,7 @@ public class ReportService : IReportService
         return sb.ToString();
     }
 
-    private static string BuildComparisonLatex(List<Inmobiscrap.Models.Property> properties)
+    private static string BuildComparisonLatex(List<Inmobiscrap.Models.Property> properties, List<Inmobiscrap.Models.PropertySnapshot> snapshots)
     {
         var sb = new StringBuilder();
         var now = DateTime.Now;
@@ -610,12 +615,24 @@ public class ReportService : IReportService
                 sb.Append($" & {(p.PublicationDate.HasValue ? p.PublicationDate.Value.ToString("dd/MM/yyyy") : "---")}");
             sb.AppendLine(" \\\\");
 
-            // Days on market
+            // Days on market (publicationDate ?? firstSeenAt fallback)
             sb.Append("  \\textbf{Días en mercado}");
             foreach (var p in chunk)
             {
-                var days = p.PublicationDate.HasValue ? (int)(DateTime.UtcNow - p.PublicationDate.Value).TotalDays : (int?)null;
-                sb.Append($" & {(days.HasValue ? days.Value.ToString() : "---")}");
+                if (p.PublicationDate.HasValue)
+                {
+                    var days = (int)(DateTime.UtcNow - p.PublicationDate.Value).TotalDays;
+                    sb.Append($" & {days}");
+                }
+                else if (p.FirstSeenAt.HasValue)
+                {
+                    var days = (int)(DateTime.UtcNow - p.FirstSeenAt.Value).TotalDays;
+                    sb.Append($@" & {days} \textcolor{{muted}}{{\tiny (est.)}}");
+                }
+                else
+                {
+                    sb.Append(" & ---");
+                }
             }
             sb.AppendLine(" \\\\");
 
@@ -830,6 +847,166 @@ public class ReportService : IReportService
 \end{axis}
 \end{tikzpicture}
 \end{center}");
+        }
+
+        // ══════════════════════════════════════════════════════════
+        // EVOLUCIÓN DE PRECIO EN EL TIEMPO
+        // ══════════════════════════════════════════════════════════
+
+        // Deduplicar por (PropertyId, día) — último snapshot del día gana
+        var snapsByProp = snapshots
+            .GroupBy(s => s.PropertyId)
+            .ToDictionary(
+                g => g.Key,
+                g => g
+                    .GroupBy(s => s.ScrapedAt.Date)
+                    .Select(dg => (
+                        Date:  dg.Key,
+                        Price: (double)dg.OrderByDescending(s => s.ScrapedAt).First().Price!,
+                        Currency: dg.OrderByDescending(s => s.ScrapedAt).First().Currency ?? "CLP"
+                    ))
+                    .OrderBy(t => t.Date)
+                    .ToList()
+            );
+
+        var propsWithHistory = properties
+            .Where(p => snapsByProp.ContainsKey(p.Id) && snapsByProp[p.Id].Count >= 1)
+            .ToList();
+
+        if (propsWithHistory.Count >= 1)
+        {
+            sb.AppendLine(@"\newpage
+\section{Evolución de Precio en el Tiempo}
+");
+
+            // Detectar moneda dominante entre todas las propiedades con historial
+            var allSnaps = propsWithHistory.SelectMany(p => snapsByProp[p.Id]).ToList();
+            var dominantCurrency = allSnaps.GroupBy(s => s.Currency.ToUpper())
+                .OrderByDescending(g => g.Count()).First().Key;
+
+            // Filtrar cada propiedad a la moneda dominante
+            var filteredByProp = propsWithHistory
+                .Select(p => (
+                    Prop: p,
+                    Points: snapsByProp[p.Id]
+                        .Where(s => s.Currency.ToUpper() == dominantCurrency)
+                        .ToList()
+                ))
+                .Where(x => x.Points.Count >= 1)
+                .ToList();
+
+            if (filteredByProp.Count >= 1)
+            {
+                // Eje X: días desde la fecha mínima
+                var allDates = filteredByProp.SelectMany(x => x.Points.Select(p => p.Date)).Distinct().OrderBy(d => d).ToList();
+                var minDate  = allDates.First();
+                var maxDate  = allDates.Last();
+                var spanDays = Math.Max(1, (maxDate - minDate).TotalDays);
+
+                // Y range con 3% padding
+                var allPrices = filteredByProp.SelectMany(x => x.Points.Select(p => p.Price)).ToList();
+                var yMin = Math.Floor(allPrices.Min() * 0.97);
+                var yMax = Math.Ceiling(allPrices.Max() * 1.03);
+
+                // X tick labels: mostrar hasta 10 fechas uniformemente distribuidas
+                var tickDates  = allDates.Count <= 10 ? allDates
+                               : Enumerable.Range(0, 10).Select(i => allDates[(int)Math.Round(i * (allDates.Count - 1) / 9.0)]).Distinct().ToList();
+                var xtick      = string.Join(",", tickDates.Select(d => ((d - minDate).TotalDays).ToString("F0", System.Globalization.CultureInfo.InvariantCulture)));
+                var xticklabels = string.Join(",", tickDates.Select(d => d.ToString("dd/MM/yy")));
+
+                var lineColors = new[] { "primary", "accent", "down", "usado", "nuevo", "muted" };
+
+                sb.AppendLine($@"
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    title={{\textbf{{Evolución de Precio ({dominantCurrency})}}}},
+    xlabel={{Fecha}},
+    ylabel={{{dominantCurrency}}},
+    width=0.95\linewidth,
+    height=9cm,
+    xmin=0, xmax={spanDays.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)},
+    ymin={yMin.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)},
+    ymax={yMax.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)},
+    xtick={{{xtick}}},
+    xticklabels={{{xticklabels}}},
+    x tick label style={{rotate=45, anchor=east, font=\tiny}},
+    ylabel style={{font=\small}},
+    y tick label style={{font=\small, /pgf/number format/1000 sep={{\,}}}},
+    legend style={{at={{(0.5,-0.22)}}, anchor=north, legend columns=3, font=\scriptsize}},
+    grid=major,
+    grid style={{dashed, gray!30}},
+    mark options={{solid}},
+]");
+
+                for (int pi = 0; pi < filteredByProp.Count; pi++)
+                {
+                    var (prop, points) = filteredByProp[pi];
+                    var color = lineColors[pi % lineColors.Length];
+                    var mark  = pi % 2 == 0 ? "*" : "square*";
+                    var label = (prop.Title ?? $"P{properties.IndexOf(prop) + 1}");
+                    label = label.Length > 30 ? label.Substring(0, 30) + "..." : label;
+
+                    sb.Append($@"\addplot[color={color}, mark={mark}, mark size=1.5pt, thick, line width=1.2pt] coordinates {{");
+                    foreach (var pt in points)
+                    {
+                        var x = (pt.Date - minDate).TotalDays;
+                        sb.Append($"({x.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)},{pt.Price.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)}) ");
+                    }
+                    sb.AppendLine($"}};");
+                    sb.AppendLine($@"\addlegendentry{{P{properties.IndexOf(prop) + 1}: {Esc(label)}}}");
+                }
+
+                sb.AppendLine(@"\end{axis}
+\end{tikzpicture}
+\end{center}
+");
+
+                // Nota si alguna propiedad solo tiene 1 punto
+                var singlePoint = filteredByProp.Where(x => x.Points.Count == 1).ToList();
+                if (singlePoint.Any())
+                {
+                    var names = string.Join(", ", singlePoint.Select(x => $"P{properties.IndexOf(x.Prop) + 1}"));
+                    sb.AppendLine($@"\vspace{{0.3em}}
+{{\small\color{{muted}} \textbf{{Nota:}} {Esc(names)} solo cuentan con un registro de precio — no es posible mostrar evolución para estas propiedades.}}
+");
+                }
+
+                // Tabla resumen de snapshots con cambios de precio
+                var propsWithChanges = propsWithHistory
+                    .Where(p => snapshots.Any(s => s.PropertyId == p.Id && s.HasChanges && (s.ChangedFields ?? "").Contains("Price")))
+                    .ToList();
+
+                if (propsWithChanges.Any())
+                {
+                    sb.AppendLine(@"\vspace{0.5em}
+\subsection{Cambios de Precio Detectados}
+\begin{itemize}[leftmargin=1.5em]");
+                    foreach (var prop in propsWithChanges)
+                    {
+                        var changes = snapshots
+                            .Where(s => s.PropertyId == prop.Id && s.HasChanges && (s.ChangedFields ?? "").Contains("Price"))
+                            .OrderBy(s => s.ScrapedAt)
+                            .ToList();
+
+                        var propIdx = properties.IndexOf(prop) + 1;
+                        var shortTitle = (prop.Title ?? $"P{propIdx}").Length > 35 ? prop.Title!.Substring(0, 35) + "..." : prop.Title;
+                        sb.AppendLine($@"  \item \textbf{{P{propIdx} -- {Esc(shortTitle)}:}} {changes.Count} cambio(s) de precio detectado(s).");
+
+                        // Mostrar hasta 3 cambios detallados
+                        foreach (var chg in changes.Take(3))
+                            sb.AppendLine($@"    \begin{{itemize}}[leftmargin=1em]
+      \item {chg.ScrapedAt.ToString("dd/MM/yyyy HH:mm")} \textrightarrow\ \textbf{{{FormatPrice(chg.Price.HasValue ? (double)chg.Price.Value : (double?)null, chg.Currency)}}}
+    \end{{itemize}}");
+
+                        if (changes.Count > 3)
+                            sb.AppendLine($@"    \begin{{itemize}}[leftmargin=1em]
+      \item \textcolor{{muted}}{{\small ...y {changes.Count - 3} más}}
+    \end{{itemize}}");
+                    }
+                    sb.AppendLine(@"\end{itemize}");
+                }
+            }
         }
 
         sb.AppendLine(@"\newpage");
