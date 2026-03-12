@@ -61,6 +61,48 @@ public class ReportController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// GET /api/reports/compare?ids=1,2,3
+    /// Genera un PDF comparativo de propiedades específicas.
+    /// </summary>
+    [HttpGet("compare")]
+    public async Task<IActionResult> GetComparisonReport([FromQuery] string ids)
+    {
+        if (string.IsNullOrWhiteSpace(ids))
+            return BadRequest(new { message = "Proporciona IDs de propiedades separados por coma." });
+
+        var idList = ids.Split(',')
+            .Select(s => int.TryParse(s.Trim(), out var id) ? id : 0)
+            .Where(id => id > 0)
+            .Take(20)
+            .ToList();
+
+        if (idList.Count < 2)
+            return BadRequest(new { message = "Se necesitan al menos 2 propiedades para comparar." });
+
+        _logger.LogInformation(
+            "User {User} requested comparison report — ids={Ids}",
+            User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ?? "unknown",
+            string.Join(",", idList));
+
+        try
+        {
+            var pdfBytes = await _reportService.GenerateComparisonReportAsync(idList);
+            var fileName = $"comparativa-{idList.Count}-propiedades-{DateTime.Now:yyyyMMdd}.pdf";
+            return File(pdfBytes, "application/pdf", fileName);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogError(ex, "Comparison report generation failed");
+            return StatusCode(500, new { message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error generating comparison report");
+            return StatusCode(500, new { message = "Error inesperado al generar el informe comparativo." });
+        }
+    }
+
     private static string BuildFileName(ReportFilters f)
     {
         var parts = new List<string> { "informe-inmobiliario" };

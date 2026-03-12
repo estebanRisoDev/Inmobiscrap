@@ -1166,6 +1166,8 @@ Extrae TODAS las propiedades inmobiliarias que encuentres. Para cada una:
 - area: Superficie en m² (número decimal)
 - propertyType: Tipo (departamento, casa, oficina, terreno, local, etc.)
 - description: Descripción breve
+- publicationDate: Fecha de publicación del aviso (formato ISO: YYYY-MM-DD si está disponible)
+- condition: Estado de la propiedad: ""Nuevo"" o ""Usado"" (si está indicado en el aviso)
 
 Reglas:
 - Si un campo no está presente, usa null (no inventes datos)
@@ -1191,7 +1193,9 @@ Responde ÚNICAMENTE con JSON válido, sin texto adicional:
       ""bathrooms"": 2,
       ""area"": 85.0,
       ""propertyType"": ""departamento"",
-      ""description"": ""Amplio departamento con terraza""
+      ""description"": ""Amplio departamento con terraza"",
+      ""publicationDate"": ""2026-01-15"",
+      ""condition"": ""Usado""
     }}
   ]
 }}
@@ -1264,8 +1268,10 @@ TEXTO:
                     Bedrooms     = p.Bedrooms,
                     Bathrooms    = p.Bathrooms,
                     Area         = p.Area,
-                    PropertyType = p.PropertyType,
-                    Description  = p.Description
+                    PropertyType    = p.PropertyType,
+                    Description     = p.Description,
+                    PublicationDate = p.PublicationDate,
+                    Condition       = p.Condition
                 }).ToList() ?? new List<Property>();
             }
             catch (JsonException ex)
@@ -1314,8 +1320,10 @@ TEXTO:
                 Bedrooms     = 3,
                 Bathrooms    = 2,
                 Area         = 85,
-                PropertyType = "casa",
-                Description  = "Mock data generated for testing."
+                PropertyType    = "casa",
+                Description     = "Mock data generated for testing.",
+                PublicationDate = DateTime.UtcNow.AddDays(-10),
+                Condition       = "Usado"
             }
         };
 
@@ -1357,7 +1365,9 @@ TEXTO:
         public int?     Bedrooms     { get; set; }
         public int?     Bathrooms    { get; set; }
         public decimal? Area         { get; set; }
-        public string?  PropertyType { get; set; }
-        public string?  Description  { get; set; }
+        public string?  PropertyType    { get; set; }
+        public string?  Description     { get; set; }
+        public DateTime? PublicationDate { get; set; }
+        public string?  Condition       { get; set; }
     }
 }

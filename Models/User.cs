@@ -22,6 +22,15 @@ public class User
     /// <summary>Créditos de consulta (solo relevante para plan base)</summary>
     public int Credits { get; set; } = 50;
 
+    /// <summary>Créditos guardados justo antes de convertirse a Pro. Se restauran al cancelar.</summary>
+    public int? CreditsBeforePro { get; set; }
+
+    /// <summary>ID del preapproval en MercadoPago (suscripción mensual Pro)</summary>
+    public string? MpSubscriptionId { get; set; }
+
+    /// <summary>Próxima fecha de cobro mensual. Si pasa sin renovarse → downgrade automático.</summary>
+    public DateTime? NextBillingDate { get; set; }
+
     /// <summary>Fecha del último reset de créditos</summary>
     public DateTime? CreditsResetAt { get; set; }
 

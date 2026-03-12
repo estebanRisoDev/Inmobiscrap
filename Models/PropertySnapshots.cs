@@ -35,6 +35,8 @@ public class PropertySnapshot
     public int?     Bathrooms { get; set; }
     public decimal? Area { get; set; }
     public string?  PropertyType { get; set; }
+    public DateTime? PublicationDate { get; set; }
+    public string?  Condition { get; set; }
     public string?  Title { get; set; }
 
     // ── Ubicación (desnormalizada desde Property para consultas rápidas) ──────

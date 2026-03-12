@@ -8,6 +8,7 @@ namespace Inmobiscrap.Services;
 public interface IReportService
 {
     Task<byte[]> GenerateMarketReportAsync(ReportFilters filters);
+    Task<byte[]> GenerateComparisonReportAsync(List<int> propertyIds);
 }
 
 public record ReportFilters(
@@ -35,6 +36,19 @@ public class ReportService : IReportService
     {
         var data = await CollectDataAsync(filters);
         var tex  = BuildLatexDocument(data, filters);
+        return await CompileLatexAsync(tex);
+    }
+
+    public async Task<byte[]> GenerateComparisonReportAsync(List<int> propertyIds)
+    {
+        var properties = await _context.Properties
+            .Where(p => propertyIds.Contains(p.Id))
+            .ToListAsync();
+
+        if (properties.Count < 2)
+            throw new InvalidOperationException("Se necesitan al menos 2 propiedades para comparar.");
+
+        var tex = BuildComparisonLatex(properties);
         return await CompileLatexAsync(tex);
     }
 
@@ -397,6 +411,480 @@ public class ReportService : IReportService
   Este informe fue generado automáticamente por \textbf{InmobiScrap}.
   Los datos provienen de scraping de portales inmobiliarios chilenos y pueden contener imprecisiones.
   Todos los precios en UF y CLP corresponden a la moneda indicada por la fuente original.
+}
+
+\end{document}");
+
+        return sb.ToString();
+    }
+
+    private static string BuildComparisonLatex(List<Inmobiscrap.Models.Property> properties)
+    {
+        var sb = new StringBuilder();
+        var now = DateTime.Now;
+
+        sb.AppendLine(@"\documentclass[11pt,a4paper]{article}
+
+% ── Encoding & idioma ──────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+
+% ── Tipografía ─────────────────────────────────────────────────────────────────
+\usepackage{lmodern}
+\usepackage{microtype}
+
+% ── Layout ────────────────────────────────────────────────────────────────────
+\usepackage[landscape,top=1.8cm,bottom=1.8cm,left=1.5cm,right=1.5cm]{geometry}
+\usepackage{parskip}
+
+% ── Colores ───────────────────────────────────────────────────────────────────
+\usepackage[table]{xcolor}
+\definecolor{primary}{HTML}{0F4C81}
+\definecolor{accent}{HTML}{2EC4B6}
+\definecolor{lightbg}{HTML}{F0F4F8}
+\definecolor{muted}{HTML}{6C757D}
+\definecolor{up}{HTML}{16A34A}
+\definecolor{down}{HTML}{DC2626}
+\definecolor{nuevo}{HTML}{2A9D8F}
+\definecolor{usado}{HTML}{F4A261}
+
+% ── Tablas ────────────────────────────────────────────────────────────────────
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{longtable}
+\newcolumntype{R}[1]{>{\raggedleft\arraybackslash}p{#1}}
+\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+
+% ── Gráficos ─────────────────────────────────────────────────────────────────
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+
+% ── Cabecera / pie ─────────────────────────────────────────────────────────────
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.4pt}
+\fancyhead[L]{\small\color{muted}InmobiScrap --- Comparativa}
+\fancyhead[R]{\small\color{muted}" + Esc(now.ToString("dd/MM/yyyy HH:mm")) + @"}
+\fancyfoot[C]{\small\color{muted}\thepage}
+
+% ── Título personalizado ───────────────────────────────────────────────────────
+\usepackage{titlesec}
+\titleformat{\section}{\large\bfseries\color{primary}}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries\color{primary}}{}{0em}{}
+
+\usepackage{graphicx}
+\usepackage{calc}
+\usepackage{enumitem}
+
+\begin{document}
+
+% ─────────────────────────────────────────────────────────────────────────────
+%  PORTADA
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{center}
+  {\Huge\bfseries\color{primary} InmobiScrap}\\[6pt]
+  {\large\color{muted} Informe Comparativo de Propiedades}\\[4pt]
+  {\normalsize\color{muted} " + properties.Count + @" propiedades seleccionadas}\\[8pt]
+  \textcolor{muted}{\rule{\linewidth}{0.6pt}}\\[4pt]
+  {\small\color{muted} Generado el " + Esc(now.ToString("dddd, dd 'de' MMMM 'de' yyyy", new System.Globalization.CultureInfo("es-CL"))) + @"}
+\end{center}
+
+\vspace{1em}
+
+% ─────────────────────────────────────────────────────────────────────────────
+%  TABLAS COMPARATIVAS
+% ─────────────────────────────────────────────────────────────────────────────
+\section{Comparación de Propiedades}
+");
+
+        // Split into chunks of up to 5 properties per table
+        const int chunkSize = 5;
+        var chunks = new List<List<Inmobiscrap.Models.Property>>();
+        for (int c = 0; c < properties.Count; c += chunkSize)
+            chunks.Add(properties.Skip(c).Take(chunkSize).ToList());
+
+        for (int ci = 0; ci < chunks.Count; ci++)
+        {
+            var chunk = chunks[ci];
+            var startIdx = ci * chunkSize; // global index offset
+
+            if (ci > 0)
+                sb.AppendLine(@"\vspace{1em}");
+
+            if (chunks.Count > 1)
+                sb.AppendLine($@"\subsection{{Propiedades {startIdx + 1} a {startIdx + chunk.Count}}}");
+
+            var colWidth = Math.Max(3.0, 22.0 / chunk.Count);
+            var colSpec = string.Join(" ", chunk.Select(_ =>
+                "C{" + colWidth.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + "cm}"));
+
+            sb.AppendLine($@"
+\rowcolors{{2}}{{lightbg}}{{white}}
+\begin{{tabularx}}{{\linewidth}}{{L{{3.2cm}} {colSpec}}}
+  \toprule
+  \rowcolor{{primary}}
+  \textcolor{{white}}{{\textbf{{Atributo}}}}");
+
+            for (int i = 0; i < chunk.Count; i++)
+                sb.Append($" & \\textcolor{{white}}{{\\textbf{{P{startIdx + i + 1}}}}}");
+            sb.AppendLine(@" \\
+  \midrule");
+
+            // Title
+            sb.Append("  \\textbf{Título}");
+            foreach (var p in chunk)
+            {
+                var maxLen = chunk.Count <= 3 ? 40 : 25;
+                var title = (p.Title ?? "---").Length > maxLen ? p.Title!.Substring(0, maxLen) + "..." : (p.Title ?? "---");
+                sb.Append($" & {{\\small {Esc(title)}}}");
+            }
+            sb.AppendLine(" \\\\");
+
+            // Price
+            sb.Append("  \\textbf{Precio}");
+            foreach (var p in chunk)
+                sb.Append($" & \\textbf{{{FormatPrice(p.Price.HasValue ? (double)p.Price.Value : (double?)null, p.Currency)}}}");
+            sb.AppendLine(" \\\\");
+
+            // Type
+            sb.Append("  \\textbf{Tipo}");
+            foreach (var p in chunk) sb.Append($" & {Esc(p.PropertyType)}");
+            sb.AppendLine(" \\\\");
+
+            // Condition
+            sb.Append("  \\textbf{Estado}");
+            foreach (var p in chunk)
+            {
+                var cond = p.Condition ?? "---";
+                var color = cond == "Nuevo" ? "nuevo" : cond == "Usado" ? "usado" : "muted";
+                sb.Append($" & \\textcolor{{{color}}}{{{Esc(cond)}}}");
+            }
+            sb.AppendLine(" \\\\");
+
+            // Bedrooms
+            sb.Append("  \\textbf{Dormitorios}");
+            foreach (var p in chunk) sb.Append($" & {(p.Bedrooms.HasValue ? p.Bedrooms.Value.ToString() : "---")}");
+            sb.AppendLine(" \\\\");
+
+            // Bathrooms
+            sb.Append("  \\textbf{Baños}");
+            foreach (var p in chunk) sb.Append($" & {(p.Bathrooms.HasValue ? p.Bathrooms.Value.ToString() : "---")}");
+            sb.AppendLine(" \\\\");
+
+            // Area
+            sb.Append("  \\textbf{Superficie}");
+            foreach (var p in chunk) sb.Append($" & {(p.Area.HasValue ? $"{p.Area.Value:F0} m\\textsuperscript{{2}}" : "---")}");
+            sb.AppendLine(" \\\\");
+
+            // Price per sqm
+            sb.Append("  \\textbf{Precio/m\\textsuperscript{2}}");
+            foreach (var p in chunk)
+            {
+                if (p.Price.HasValue && p.Price > 0 && p.Area.HasValue && p.Area > 0)
+                {
+                    var ppsqm = Math.Round(p.Price.Value / p.Area.Value, 0);
+                    sb.Append($" & \\textbf{{{ppsqm:N0} {Esc(p.Currency ?? "CLP")}}}");
+                }
+                else
+                    sb.Append(" & ---");
+            }
+            sb.AppendLine(" \\\\");
+
+            // City
+            sb.Append("  \\textbf{Ciudad}");
+            foreach (var p in chunk) sb.Append($" & {Esc(p.City)}");
+            sb.AppendLine(" \\\\");
+
+            // Neighborhood
+            sb.Append("  \\textbf{Comuna}");
+            foreach (var p in chunk) sb.Append($" & {Esc(p.Neighborhood)}");
+            sb.AppendLine(" \\\\");
+
+            // Publication Date
+            sb.Append("  \\textbf{Publicación}");
+            foreach (var p in chunk)
+                sb.Append($" & {(p.PublicationDate.HasValue ? p.PublicationDate.Value.ToString("dd/MM/yyyy") : "---")}");
+            sb.AppendLine(" \\\\");
+
+            // Days on market
+            sb.Append("  \\textbf{Días en mercado}");
+            foreach (var p in chunk)
+            {
+                var days = p.PublicationDate.HasValue ? (int)(DateTime.UtcNow - p.PublicationDate.Value).TotalDays : (int?)null;
+                sb.Append($" & {(days.HasValue ? days.Value.ToString() : "---")}");
+            }
+            sb.AppendLine(" \\\\");
+
+            // First seen
+            sb.Append("  \\textbf{Detectada}");
+            foreach (var p in chunk)
+                sb.Append($" & {(p.FirstSeenAt.HasValue ? p.FirstSeenAt.Value.ToString("dd/MM/yyyy") : "---")}");
+            sb.AppendLine(" \\\\");
+
+            // Times scraped
+            sb.Append("  \\textbf{Veces detectada}");
+            foreach (var p in chunk) sb.Append($" & {p.TimesScraped}");
+            sb.AppendLine(" \\\\");
+
+            // Status
+            sb.Append("  \\textbf{Estado listado}");
+            foreach (var p in chunk)
+            {
+                var status = p.ListingStatus ?? "---";
+                sb.Append($" & {Esc(status)}");
+            }
+            sb.AppendLine(" \\\\");
+
+            sb.AppendLine(@"  \bottomrule
+\end{tabularx}");
+        }
+
+        sb.AppendLine(@"\vspace{1.5em}");
+
+        // ══════════════════════════════════════════════════════════════
+        // GRÁFICOS COMPARATIVOS
+        // ══════════════════════════════════════════════════════════════
+        sb.AppendLine(@"\newpage
+\section{Gráficos Comparativos}");
+
+        // Define bar colors (cycle through them)
+        var barColors = new[] { "primary", "accent", "usado", "nuevo", "muted", "down", "up" };
+
+        // ── Chart 1: Price comparison ──────────────────────────────
+        var pricedForChart = properties.Where(p => p.Price.HasValue && p.Price > 0).ToList();
+        if (pricedForChart.Count >= 2)
+        {
+            // Group by currency to make separate charts
+            var currencyGroups = pricedForChart.GroupBy(p => (p.Currency ?? "CLP").ToUpper()).ToList();
+            foreach (var cg in currencyGroups)
+            {
+                var items = cg.ToList();
+                var maxPrice = items.Max(p => (double)p.Price!);
+                var yMax = Math.Ceiling(maxPrice * 1.15);
+
+                sb.AppendLine($@"
+\vspace{{0.5em}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    title={{\textbf{{Precio ({cg.Key})}}}},
+    ybar,
+    bar width=0.5cm,
+    width=0.9\linewidth,
+    height=8cm,
+    ymin=0, ymax={yMax.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)},
+    symbolic x coords={{{string.Join(",", items.Select((_, i) => $"P{properties.IndexOf(_) + 1}"))}}},
+    xtick=data,
+    x tick label style={{rotate=45, anchor=east, font=\small}},
+    ylabel={{{cg.Key}}},
+    ylabel style={{font=\small}},
+    y tick label style={{font=\small, /pgf/number format/1000 sep={{\,}}}},
+    nodes near coords,
+    nodes near coords style={{font=\tiny, rotate=90, anchor=west}},
+    every node near coord/.append style={{/pgf/number format/1000 sep={{\,}}}},
+    enlarge x limits=0.05,
+    grid=major,
+    grid style={{dashed, gray!30}},
+]
+\addplot[fill=primary!80] coordinates {{");
+                foreach (var p in items)
+                    sb.Append($"(P{properties.IndexOf(p) + 1},{(double)p.Price!:F0}) ");
+                sb.AppendLine(@"};
+\end{axis}
+\end{tikzpicture}
+\end{center}");
+            }
+        }
+
+        // ── Chart 2: Price per m² ──────────────────────────────────
+        var withPricePerSqm = properties.Where(p => p.Price > 0 && p.Area > 0).ToList();
+        if (withPricePerSqm.Count >= 2)
+        {
+            var currencyGroups2 = withPricePerSqm.GroupBy(p => (p.Currency ?? "CLP").ToUpper()).ToList();
+            foreach (var cg in currencyGroups2)
+            {
+                var items = cg.ToList();
+                var ppsqmValues = items.Select(p => (double)(p.Price!.Value / p.Area!.Value)).ToList();
+                var yMax = Math.Ceiling(ppsqmValues.Max() * 1.15);
+
+                sb.AppendLine($@"
+\vspace{{0.5em}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    title={{\textbf{{Precio/m\textsuperscript{{2}} ({cg.Key})}}}},
+    ybar,
+    bar width=0.5cm,
+    width=0.9\linewidth,
+    height=8cm,
+    ymin=0, ymax={yMax.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)},
+    symbolic x coords={{{string.Join(",", items.Select(p => $"P{properties.IndexOf(p) + 1}"))}}},
+    xtick=data,
+    x tick label style={{rotate=45, anchor=east, font=\small}},
+    ylabel={{{cg.Key}/m\textsuperscript{{2}}}},
+    ylabel style={{font=\small}},
+    y tick label style={{font=\small, /pgf/number format/1000 sep={{\,}}}},
+    nodes near coords,
+    nodes near coords style={{font=\tiny, rotate=90, anchor=west}},
+    every node near coord/.append style={{/pgf/number format/1000 sep={{\,}}}},
+    enlarge x limits=0.05,
+    grid=major,
+    grid style={{dashed, gray!30}},
+]
+\addplot[fill=accent!80] coordinates {{");
+                foreach (var p in items)
+                {
+                    var ppsqm = (double)(p.Price!.Value / p.Area!.Value);
+                    sb.Append($"(P{properties.IndexOf(p) + 1},{ppsqm:F0}) ");
+                }
+                sb.AppendLine(@"};
+\end{axis}
+\end{tikzpicture}
+\end{center}");
+            }
+        }
+
+        // ── Chart 3: Surface area ──────────────────────────────────
+        var withArea = properties.Where(p => p.Area.HasValue && p.Area > 0).ToList();
+        if (withArea.Count >= 2)
+        {
+            var yMaxArea = Math.Ceiling((double)withArea.Max(p => p.Area!) * 1.15);
+            sb.AppendLine($@"
+\vspace{{0.5em}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    title={{\textbf{{Superficie (m\textsuperscript{{2}})}}}},
+    ybar,
+    bar width=0.5cm,
+    width=0.9\linewidth,
+    height=8cm,
+    ymin=0, ymax={yMaxArea.ToString("F0", System.Globalization.CultureInfo.InvariantCulture)},
+    symbolic x coords={{{string.Join(",", withArea.Select(p => $"P{properties.IndexOf(p) + 1}"))}}},
+    xtick=data,
+    x tick label style={{rotate=45, anchor=east, font=\small}},
+    ylabel={{m\textsuperscript{{2}}}},
+    ylabel style={{font=\small}},
+    y tick label style={{font=\small}},
+    nodes near coords,
+    nodes near coords style={{font=\tiny, rotate=90, anchor=west}},
+    enlarge x limits=0.05,
+    grid=major,
+    grid style={{dashed, gray!30}},
+]
+\addplot[fill=usado!80] coordinates {{");
+            foreach (var p in withArea)
+                sb.Append($"(P{properties.IndexOf(p) + 1},{(double)p.Area!:F0}) ");
+            sb.AppendLine(@"};
+\end{axis}
+\end{tikzpicture}
+\end{center}");
+        }
+
+        // ── Chart 4: Bedrooms + Bathrooms grouped bar ──────────────
+        var withRooms = properties.Where(p => p.Bedrooms.HasValue || p.Bathrooms.HasValue).ToList();
+        if (withRooms.Count >= 2)
+        {
+            var maxRooms = Math.Max(
+                withRooms.Max(p => p.Bedrooms ?? 0),
+                withRooms.Max(p => p.Bathrooms ?? 0));
+
+            sb.AppendLine($@"
+\vspace{{0.5em}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    title={{\textbf{{Dormitorios y Baños}}}},
+    ybar,
+    bar width=0.3cm,
+    width=0.9\linewidth,
+    height=7cm,
+    ymin=0, ymax={maxRooms + 2},
+    symbolic x coords={{{string.Join(",", withRooms.Select(p => $"P{properties.IndexOf(p) + 1}"))}}},
+    xtick=data,
+    x tick label style={{rotate=45, anchor=east, font=\small}},
+    ylabel={{Cantidad}},
+    ylabel style={{font=\small}},
+    y tick label style={{font=\small}},
+    nodes near coords,
+    nodes near coords style={{font=\tiny}},
+    enlarge x limits=0.05,
+    legend style={{at={{(0.5,-0.2)}}, anchor=north, legend columns=2, font=\small}},
+    grid=major,
+    grid style={{dashed, gray!30}},
+]
+\addplot[fill=primary!70] coordinates {{");
+            foreach (var p in withRooms)
+                sb.Append($"(P{properties.IndexOf(p) + 1},{p.Bedrooms ?? 0}) ");
+            sb.AppendLine(@"};
+\addlegendentry{Dormitorios}");
+            sb.Append(@"\addplot[fill=nuevo!70] coordinates {");
+            foreach (var p in withRooms)
+                sb.Append($"(P{properties.IndexOf(p) + 1},{p.Bathrooms ?? 0}) ");
+            sb.AppendLine(@"};
+\addlegendentry{Baños}
+\end{axis}
+\end{tikzpicture}
+\end{center}");
+        }
+
+        sb.AppendLine(@"\newpage");
+
+        // ── Price comparison summary ─────────────────────────────
+        var priced = properties.Where(p => p.Price.HasValue && p.Price > 0).ToList();
+        if (priced.Count >= 2)
+        {
+            sb.AppendLine(@"\section{Resumen de Precios}");
+
+            // Group by currency
+            var byCurrency = priced.GroupBy(p => (p.Currency ?? "CLP").ToUpper()).ToList();
+            foreach (var group in byCurrency)
+            {
+                var prices = group.Select(p => (double)p.Price!.Value).ToList();
+                var avg = prices.Average();
+                var min = prices.Min();
+                var max = prices.Max();
+                var cheapest = group.OrderBy(p => p.Price).First();
+                var expensive = group.OrderByDescending(p => p.Price).First();
+
+                sb.AppendLine($@"
+\subsection{{Propiedades en {group.Key}}}
+\begin{{itemize}}[leftmargin=1.5em]
+  \item Precio promedio: \textbf{{{FormatPrice(avg, group.Key)}}}
+  \item Rango: {FormatPrice(min, group.Key)} -- {FormatPrice(max, group.Key)}
+  \item Más económica: \textbf{{{Esc((cheapest.Title ?? "").Length > 40 ? cheapest.Title!.Substring(0, 40) + "..." : cheapest.Title)}}} ({FormatPrice((double)cheapest.Price!, group.Key)})
+  \item Más cara: \textbf{{{Esc((expensive.Title ?? "").Length > 40 ? expensive.Title!.Substring(0, 40) + "..." : expensive.Title)}}} ({FormatPrice((double)expensive.Price!, group.Key)})
+\end{{itemize}}");
+            }
+        }
+
+        // ── Condition summary ────────────────────────────────────
+        var withCondition = properties.Where(p => !string.IsNullOrEmpty(p.Condition)).ToList();
+        if (withCondition.Count > 0)
+        {
+            var nuevo = withCondition.Count(p => p.Condition == "Nuevo");
+            var usado = withCondition.Count(p => p.Condition == "Usado");
+            sb.AppendLine($@"
+\vspace{{0.5em}}
+\subsection{{Estado de las propiedades}}
+\begin{{itemize}}[leftmargin=1.5em]
+  \item \textcolor{{nuevo}}{{Nuevas: {nuevo}}}
+  \item \textcolor{{usado}}{{Usadas: {usado}}}
+  \item Sin información: {properties.Count - withCondition.Count}
+\end{{itemize}}");
+        }
+
+        // ── Footer ───────────────────────────────────────────────
+        sb.AppendLine(@"
+\vfill
+\textcolor{muted}{\rule{\linewidth}{0.4pt}}\\
+{\scriptsize\color{muted}
+  Este informe comparativo fue generado automáticamente por \textbf{InmobiScrap}.
+  Los datos provienen de scraping de portales inmobiliarios chilenos y pueden contener imprecisiones.
 }
 
 \end{document}");

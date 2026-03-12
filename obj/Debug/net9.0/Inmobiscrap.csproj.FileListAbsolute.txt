@@ -507,3 +507,6 @@ C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\obj\Debug\net9.0\r
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\obj\Debug\net9.0\Inmobiscrap.pdb
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\obj\Debug\net9.0\Inmobiscrap.genruntimeconfig.cache
 C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\obj\Debug\net9.0\ref\Inmobiscrap.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\Stripe.net.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\System.Configuration.ConfigurationManager.dll
+C:\Users\Esteban Risopatrón\Documents\C#\Inmobiscrap-backend\bin\Debug\net9.0\System.Security.Cryptography.ProtectedData.dll

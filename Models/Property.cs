@@ -21,6 +21,12 @@ public class Property
     public decimal? Area { get; set; }
     public string? PropertyType { get; set; }
 
+    /// <summary>Fecha de publicación del aviso (extraída del sitio web)</summary>
+    public DateTime? PublicationDate { get; set; }
+
+    /// <summary>"Nuevo" | "Usado" | null</summary>
+    public string? Condition { get; set; }
+
     // Descripción
     public string? Description { get; set; }
 

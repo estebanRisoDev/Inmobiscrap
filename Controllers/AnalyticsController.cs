@@ -21,7 +21,7 @@ public class AnalyticsController : ControllerBase
         return int.TryParse(claim, out var id) ? id : 0;
     }
 
-    private async Task<IActionResult?> ConsumeCredit()
+    private async Task<IActionResult?> ConsumeCredits(int amount = 5)
     {
         var userId = GetUserId();
         var user = await _context.Users.FindAsync(userId);
@@ -29,17 +29,17 @@ public class AnalyticsController : ControllerBase
 
         if (user.Plan == "pro" || user.Role == "admin") return null;
 
-        if (user.Credits <= 0)
+        if (user.Credits < amount)
         {
             return StatusCode(402, new
             {
-                message = "Sin créditos. Actualiza a Pro para consultas ilimitadas.",
-                credits = 0,
+                message = $"Créditos insuficientes. Necesitas {amount}, tienes {user.Credits}.",
+                credits = user.Credits,
                 plan = user.Plan,
             });
         }
 
-        user.Credits--;
+        user.Credits -= amount;
         await _context.SaveChangesAsync();
         HttpContext.Response.Headers.Append("X-Credits-Remaining", user.Credits.ToString());
         return null;
@@ -78,7 +78,7 @@ public class AnalyticsController : ControllerBase
         [FromQuery] string? region = null, [FromQuery] string? city = null,
         [FromQuery] string? neighborhood = null, [FromQuery] string? propertyType = null)
     {
-        var check = await ConsumeCredit();
+        var check = await ConsumeCredits();
         if (check != null) return check;
 
         var query = ApplyFilters(_context.Properties.AsQueryable(), region, city, neighborhood, propertyType);
@@ -206,7 +206,7 @@ public class AnalyticsController : ControllerBase
         [FromQuery] string? region = null, [FromQuery] string? city = null,
         [FromQuery] string? neighborhood = null)
     {
-        var check = await ConsumeCredit();
+        var check = await ConsumeCredits();
         if (check != null) return check;
 
         var bots = await _context.Bots
@@ -234,7 +234,7 @@ public class AnalyticsController : ControllerBase
         [FromQuery] string? region = null, [FromQuery] string? city = null,
         [FromQuery] string? neighborhood = null, [FromQuery] string? propertyType = null)
     {
-        var check = await ConsumeCredit();
+        var check = await ConsumeCredits();
         if (check != null) return check;
 
         var query = ApplyFilters(_context.Properties.AsQueryable(), region, city, neighborhood, propertyType);

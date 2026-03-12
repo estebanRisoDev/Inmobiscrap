@@ -22,11 +22,20 @@ builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowLocalhost", policy =>
     {
-        policy.WithOrigins(
-                "http://localhost:3000",
-                "http://localhost:3001",
-                "http://127.0.0.1:3000",
-                "http://127.0.0.1:3001")
+        var origins = new List<string>
+        {
+            "http://localhost:3000",
+            "http://localhost:3001",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3001",
+        };
+
+        // Include FRONTEND_URL so MP redirect origin is allowed
+        var frontendUrl = Environment.GetEnvironmentVariable("FRONTEND_URL");
+        if (!string.IsNullOrEmpty(frontendUrl))
+            origins.Add(frontendUrl.TrimEnd('/'));
+
+        policy.WithOrigins(origins.ToArray())
             .AllowAnyHeader()
             .AllowAnyMethod()
             .AllowCredentials();
@@ -110,6 +119,7 @@ builder.Services.AddScoped<IBotLogService, BotLogService>();
 builder.Services.AddScoped<IPropertyUpsertService, PropertyUpsertService>();
 builder.Services.AddScoped<IReportService, ReportService>(); 
 builder.Services.AddScoped<ScrapingJob>();
+builder.Services.AddScoped<SubscriptionExpiryJob>();
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -315,6 +325,11 @@ using (var scope = app.Services.CreateScope())
         "execute-all-bots",
         job => job.ExecuteAllActiveBotsAsync(),
         Cron.Hourly());
+
+    recurringJobs.AddOrUpdate<SubscriptionExpiryJob>(
+        "check-subscription-expiry",
+        job => job.CheckAndExpireSubscriptionsAsync(),
+        Cron.Daily());
 }
 
 var port = Environment.GetEnvironmentVariable("API_PORT") ?? "5000";

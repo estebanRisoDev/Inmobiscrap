@@ -12,6 +12,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<PropertySnapshot> PropertySnapshots { get; set; } = null!;
     public DbSet<Bot>              Bots       { get; set; } = null!;
     public DbSet<User>             Users      { get; set; } = null!;
+    public DbSet<Payment>          Payments   { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -28,6 +29,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(p => p.Neighborhood).HasMaxLength(200);
             entity.Property(p => p.SourceUrl).HasMaxLength(2000);
             entity.Property(p => p.PropertyType).HasMaxLength(50);
+            entity.Property(p => p.Condition).HasMaxLength(20);
             entity.Property(p => p.Description).HasColumnType("TEXT");
             entity.Property(p => p.Price).HasPrecision(18, 2);
             entity.Property(p => p.Area).HasPrecision(10, 2);
@@ -38,6 +40,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(p => p.TimesScraped).HasDefaultValue(1);
             entity.Property(p => p.PreviousPrice).HasPrecision(18, 2);
 
+            entity.HasIndex(p => p.Condition).HasDatabaseName("IX_Properties_Condition");
             entity.HasIndex(p => p.Fingerprint).HasDatabaseName("IX_Properties_Fingerprint");
             entity.HasIndex(p => p.SourceUrl).HasDatabaseName("IX_Properties_SourceUrl");
             entity.HasIndex(p => p.ListingStatus).HasDatabaseName("IX_Properties_ListingStatus");
@@ -55,6 +58,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(s => s.Title).HasMaxLength(500);
             entity.Property(s => s.Price).HasPrecision(18, 2);
             entity.Property(s => s.Area).HasPrecision(10, 2);
+            entity.Property(s => s.Condition).HasMaxLength(20);
             entity.Property(s => s.HasChanges).HasDefaultValue(false);
             entity.Property(s => s.ChangedFields).HasMaxLength(200);
 
@@ -108,6 +112,23 @@ public class ApplicationDbContext : DbContext
             entity.HasIndex(b => b.Status).HasDatabaseName("IX_Bots_Status");
         });
 
+        // ============ PAYMENT ============
+        modelBuilder.Entity<Payment>(entity =>
+        {
+            entity.Property(p => p.Type).IsRequired().HasMaxLength(50);
+            entity.Property(p => p.Description).IsRequired().HasMaxLength(300);
+            entity.Property(p => p.MpId).HasMaxLength(200).IsRequired(false);
+            entity.Property(p => p.CreatedAt).HasDefaultValueSql("NOW()");
+
+            entity.HasOne(p => p.User)
+                  .WithMany()
+                  .HasForeignKey(p => p.UserId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasIndex(p => p.UserId).HasDatabaseName("IX_Payments_UserId");
+            entity.HasIndex(p => p.CreatedAt).HasDatabaseName("IX_Payments_CreatedAt");
+        });
+
         // ============ USER ============
         modelBuilder.Entity<User>(entity =>
         {
@@ -121,6 +142,9 @@ public class ApplicationDbContext : DbContext
             entity.Property(u => u.CreatedAt).HasDefaultValueSql("NOW()");
             entity.Property(u => u.Plan).HasMaxLength(20).HasDefaultValue("base");
             entity.Property(u => u.Credits).HasDefaultValue(50);
+            entity.Property(u => u.CreditsBeforePro).IsRequired(false);
+            entity.Property(u => u.MpSubscriptionId).HasMaxLength(100).IsRequired(false);
+            entity.Property(u => u.NextBillingDate).IsRequired(false);
 
             entity.HasIndex(u => u.Email).IsUnique().HasDatabaseName("IX_Users_Email");
             entity.HasIndex(u => u.GoogleId).HasDatabaseName("IX_Users_GoogleId");

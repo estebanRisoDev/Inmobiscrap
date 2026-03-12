@@ -236,11 +236,13 @@ public class PropertyUpsertService : IPropertyUpsertService
                 Area          = scraped.Area,
                 PropertyType  = scraped.PropertyType,
                 Title         = scraped.Title,
-                Region        = scraped.Region,
-                City          = scraped.City,
-                Neighborhood  = scraped.Neighborhood,
-                HasChanges    = false,
-                ChangedFields = null,
+                Region          = scraped.Region,
+                City            = scraped.City,
+                Neighborhood    = scraped.Neighborhood,
+                PublicationDate = scraped.PublicationDate,
+                Condition       = scraped.Condition,
+                HasChanges      = false,
+                ChangedFields   = null,
             });
 
             await _context.SaveChangesAsync();
@@ -315,12 +317,22 @@ public class PropertyUpsertService : IPropertyUpsertService
             existing.PropertyType = scraped.PropertyType;
         }
 
+        if (!string.IsNullOrWhiteSpace(scraped.Condition)
+            && !string.IsNullOrWhiteSpace(existing.Condition)
+            && scraped.Condition != existing.Condition)
+        {
+            changedFields.Add("Condition");
+            existing.Condition = scraped.Condition;
+        }
+
         // Enriquecer campos que antes eran null
         if (string.IsNullOrEmpty(existing.Region)       && !string.IsNullOrEmpty(scraped.Region))       existing.Region       = scraped.Region;
         if (string.IsNullOrEmpty(existing.Neighborhood) && !string.IsNullOrEmpty(scraped.Neighborhood)) existing.Neighborhood = scraped.Neighborhood;
         if (string.IsNullOrEmpty(existing.Address)      && !string.IsNullOrEmpty(scraped.Address))      existing.Address      = scraped.Address;
         if (string.IsNullOrEmpty(existing.Description)  && !string.IsNullOrEmpty(scraped.Description))  existing.Description  = scraped.Description;
         if (string.IsNullOrEmpty(existing.SourceUrl)    && !string.IsNullOrEmpty(scraped.SourceUrl))    existing.SourceUrl    = scraped.SourceUrl;
+        if (existing.Condition == null && !string.IsNullOrWhiteSpace(scraped.Condition)) existing.Condition = scraped.Condition;
+        if (!existing.PublicationDate.HasValue && scraped.PublicationDate.HasValue) existing.PublicationDate = scraped.PublicationDate;
 
         var hasChanges = changedFields.Count > 0;
 
@@ -336,11 +348,13 @@ public class PropertyUpsertService : IPropertyUpsertService
             Area          = existing.Area,
             PropertyType  = existing.PropertyType,
             Title         = existing.Title,
-            Region        = existing.Region,
-            City          = existing.City,
-            Neighborhood  = existing.Neighborhood,
-            HasChanges    = hasChanges,
-            ChangedFields = hasChanges ? string.Join(",", changedFields) : null,
+            Region          = existing.Region,
+            City            = existing.City,
+            Neighborhood    = existing.Neighborhood,
+            PublicationDate = existing.PublicationDate,
+            Condition       = existing.Condition,
+            HasChanges      = hasChanges,
+            ChangedFields   = hasChanges ? string.Join(",", changedFields) : null,
         });
 
         await _context.SaveChangesAsync();
