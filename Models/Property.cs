@@ -27,6 +27,9 @@ public class Property
     /// <summary>"Nuevo" | "Usado" | null</summary>
     public string? Condition { get; set; }
 
+    /// <summary>true = arriendo, false = venta, null = no determinado</summary>
+    public bool? IsArriendo { get; set; }
+
     // Descripción
     public string? Description { get; set; }
 
@@ -44,7 +47,7 @@ public class Property
     /// <summary>Cuántas veces ha sido observada por bots</summary>
     public int TimesScraped { get; set; } = 1;
 
-    /// <summary>"active" | "price_changed" | "delisted"</summary>
+    /// <summary>"active" | "price_changed" | "missing" | "sold" | "relisted"</summary>
     public string? ListingStatus { get; set; } = "active";
 
     /// <summary>Precio de la observación anterior (atajo para mostrar variación)</summary>
@@ -52,6 +55,15 @@ public class Property
 
     /// <summary>Cuándo cambió de precio por última vez</summary>
     public DateTime? PriceChangedAt { get; set; }
+
+    /// <summary>Cuándo se detectó como vendida</summary>
+    public DateTime? SoldDetectedAt { get; set; }
+
+    /// <summary>Scrapes consecutivos donde no apareció la propiedad</summary>
+    public int ConsecutiveMisses { get; set; } = 0;
+
+    /// <summary>Última vez que se verificó el SourceUrl directamente</summary>
+    public DateTime? LastVerifiedAt { get; set; }
 
     // ── Navegación ────────────────────────────────────────────────────────────
     public ICollection<PropertySnapshot> Snapshots { get; set; } = new List<PropertySnapshot>();

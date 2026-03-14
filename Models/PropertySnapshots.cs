@@ -37,6 +37,7 @@ public class PropertySnapshot
     public string?  PropertyType { get; set; }
     public DateTime? PublicationDate { get; set; }
     public string?  Condition { get; set; }
+    public bool?    IsArriendo { get; set; }
     public string?  Title { get; set; }
 
     // ── Ubicación (desnormalizada desde Property para consultas rápidas) ──────

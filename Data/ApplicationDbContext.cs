@@ -39,6 +39,7 @@ public class ApplicationDbContext : DbContext
             entity.Property(p => p.ListingStatus).HasMaxLength(30).HasDefaultValue("active");
             entity.Property(p => p.TimesScraped).HasDefaultValue(1);
             entity.Property(p => p.PreviousPrice).HasPrecision(18, 2);
+            entity.Property(p => p.ConsecutiveMisses).HasDefaultValue(0);
 
             entity.HasIndex(p => p.Condition).HasDatabaseName("IX_Properties_Condition");
             entity.HasIndex(p => p.Fingerprint).HasDatabaseName("IX_Properties_Fingerprint");

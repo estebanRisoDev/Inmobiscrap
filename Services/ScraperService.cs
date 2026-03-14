@@ -151,7 +151,7 @@ public class ScraperService : IScraperService
                 $"✅ Noise removed: {cleanedHtml.Length:N0} chars (reduced {reductionPct}%)");
 
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "📝 Converting HTML to compact text");
-            var compactText = ConvertHtmlToText(cleanedHtml);
+            var compactText = ConvertHtmlToText(cleanedHtml, bot.Url);
             await _botLogService.LogInfoAsync(bot.Id, bot.Name,
                 $"📝 Compact text from HTML: {compactText.Length:N0} chars");
 
@@ -198,7 +198,7 @@ public class ScraperService : IScraperService
 
                     var jsEmbedded  = ExtractEmbeddedJsonData(jsHtml);
                     var jsCleaned   = RemoveNoiseTags(jsHtml);
-                    var jsText      = ConvertHtmlToText(jsCleaned);
+                    var jsText      = ConvertHtmlToText(jsCleaned, bot.Url);
 
                     await _botLogService.LogInfoAsync(bot.Id, bot.Name,
                         $"📦 Playwright results — HTML text: {jsText.Length:N0} chars | Embedded: {jsEmbedded.Length:N0} chars | API data: {capturedApiData.Length:N0} chars");
@@ -610,13 +610,17 @@ public class ScraperService : IScraperService
     /// Preserva también atributos aria-label, title, alt que pueden
     /// contener texto de propiedades en SPAs.
     /// </summary>
-    private static string ConvertHtmlToText(string html)
+    private static string ConvertHtmlToText(string html, string? baseUrl = null)
     {
         var doc = new HtmlDocument();
         doc.LoadHtml(html);
 
+        Uri? baseUri = null;
+        if (!string.IsNullOrWhiteSpace(baseUrl))
+            Uri.TryCreate(baseUrl, UriKind.Absolute, out baseUri);
+
         var sb = new StringBuilder();
-        WalkNode(doc.DocumentNode, sb);
+        WalkNode(doc.DocumentNode, sb, baseUri);
 
         // Limpiar whitespace redundante
         var text = Regex.Replace(sb.ToString(), @"[ \t]+", " ");
@@ -629,7 +633,7 @@ public class ScraperService : IScraperService
         return string.Join("\n", lines).Trim();
     }
 
-    private static void WalkNode(HtmlNode node, StringBuilder sb)
+    private static void WalkNode(HtmlNode node, StringBuilder sb, Uri? baseUri = null)
     {
         if (node.NodeType == HtmlNodeType.Text)
         {
@@ -673,17 +677,22 @@ public class ScraperService : IScraperService
             }
         }
 
-        // Preservar href de links
+        // Preservar href de links — resolver relativos a absolutos
         string? href = null;
         if (tag == "a")
         {
             href = node.GetAttributeValue("href", "").Trim();
             if (string.IsNullOrEmpty(href) || href.StartsWith("javascript:") || href == "#")
                 href = null;
+            else if (href != null && baseUri != null && !href.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            {
+                if (Uri.TryCreate(baseUri, href, out var absoluteUri))
+                    href = absoluteUri.ToString();
+            }
         }
 
         foreach (var child in node.ChildNodes)
-            WalkNode(child, sb);
+            WalkNode(child, sb, baseUri);
 
         if (href != null)
             sb.Append($" [link:{href}] ");
@@ -1168,6 +1177,7 @@ Extrae TODAS las propiedades inmobiliarias que encuentres. Para cada una:
 - description: Descripción breve
 - publicationDate: Fecha de publicación del aviso (formato ISO: YYYY-MM-DD si está disponible)
 - condition: Estado de la propiedad: ""Nuevo"" o ""Usado"" (si está indicado en el aviso)
+- isArriendo: true si la propiedad es en arriendo/alquiler/renta, false si es en venta/compra, null si no es posible determinarlo con certeza
 
 Reglas:
 - Si un campo no está presente, usa null (no inventes datos)
@@ -1197,7 +1207,8 @@ Responde ÚNICAMENTE con JSON válido, sin texto adicional:
       ""propertyType"": ""departamento"",
       ""description"": ""Amplio departamento con terraza"",
       ""publicationDate"": ""2026-01-15"",
-      ""condition"": ""Usado""
+      ""condition"": ""Usado"",
+      ""isArriendo"": false
     }}
   ]
 }}
@@ -1273,7 +1284,8 @@ TEXTO:
                     PropertyType    = p.PropertyType,
                     Description     = p.Description,
                     PublicationDate = p.PublicationDate,
-                    Condition       = p.Condition
+                    Condition       = p.Condition,
+                    IsArriendo      = p.IsArriendo
                 }).ToList() ?? new List<Property>();
             }
             catch (JsonException ex)
@@ -1325,7 +1337,8 @@ TEXTO:
                 PropertyType    = "casa",
                 Description     = "Mock data generated for testing.",
                 PublicationDate = DateTime.UtcNow.AddDays(-10),
-                Condition       = "Usado"
+                Condition       = "Usado",
+                IsArriendo      = false
             }
         };
 
@@ -1371,5 +1384,6 @@ TEXTO:
         public string?  Description     { get; set; }
         public DateTime? PublicationDate { get; set; }
         public string?  Condition       { get; set; }
+        public bool?    IsArriendo      { get; set; }
     }
 }

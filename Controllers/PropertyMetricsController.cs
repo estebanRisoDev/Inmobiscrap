@@ -204,7 +204,20 @@ public class PropertyMetricsController : ControllerBase
         [FromQuery] string? neighborhood = null, [FromQuery] string? propertyType = null,
         [FromQuery] string? condition = null,
         [FromQuery] string? currency = null,
-        [FromQuery] string? sortBy = "price", [FromQuery] string? sortDir = "asc",
+        [FromQuery] bool? isArriendo = null,
+        // Column-level filters
+        [FromQuery] string?  titleSearch        = null,
+        [FromQuery] string?  citySearch         = null,
+        [FromQuery] string?  propertyTypeSearch = null,
+        [FromQuery] string?  conditionSearch    = null,
+        [FromQuery] decimal? priceMin           = null, [FromQuery] decimal? priceMax        = null,
+        [FromQuery] int?     bedrooms           = null,
+        [FromQuery] int?     bathrooms          = null,
+        [FromQuery] decimal? areaMin            = null, [FromQuery] decimal? areaMax         = null,
+        [FromQuery] decimal? pricePerSqmMin     = null, [FromQuery] decimal? pricePerSqmMax  = null,
+        [FromQuery] DateTime? pubDateFrom       = null, [FromQuery] DateTime? pubDateTo       = null,
+        [FromQuery] DateTime? firstSeenFrom     = null, [FromQuery] DateTime? firstSeenTo     = null,
+        [FromQuery] string?  sortBy = "price", [FromQuery] string? sortDir = "asc",
         [FromQuery] int page = 1, [FromQuery] int pageSize = 50)
     {
         var check = await ConsumeCredits();
@@ -216,6 +229,36 @@ public class PropertyMetricsController : ControllerBase
             query = query.Where(p => p.Condition == condition);
         if (!string.IsNullOrWhiteSpace(currency))
             query = query.Where(p => p.Currency == currency);
+        if (isArriendo.HasValue)
+            query = query.Where(p => p.IsArriendo == isArriendo.Value);
+
+        // Column-level text filters (case-insensitive via ILike)
+        if (!string.IsNullOrWhiteSpace(titleSearch))
+            query = query.Where(p => p.Title != null && EF.Functions.ILike(p.Title, $"%{titleSearch.Trim()}%"));
+        if (!string.IsNullOrWhiteSpace(citySearch))
+            query = query.Where(p => p.City != null && EF.Functions.ILike(p.City, $"%{citySearch.Trim()}%"));
+        if (!string.IsNullOrWhiteSpace(propertyTypeSearch))
+            query = query.Where(p => p.PropertyType != null && EF.Functions.ILike(p.PropertyType, $"%{propertyTypeSearch.Trim()}%"));
+        if (!string.IsNullOrWhiteSpace(conditionSearch))
+            query = query.Where(p => p.Condition != null && EF.Functions.ILike(p.Condition, $"%{conditionSearch.Trim()}%"));
+
+        // Column-level numeric filters
+        if (priceMin.HasValue)     query = query.Where(p => p.Price >= priceMin.Value);
+        if (priceMax.HasValue)     query = query.Where(p => p.Price <= priceMax.Value);
+        if (bedrooms.HasValue)  query = query.Where(p => p.Bedrooms == bedrooms.Value);
+        if (bathrooms.HasValue) query = query.Where(p => p.Bathrooms == bathrooms.Value);
+        if (areaMin.HasValue)      query = query.Where(p => p.Area >= areaMin.Value);
+        if (areaMax.HasValue)      query = query.Where(p => p.Area <= areaMax.Value);
+        if (pricePerSqmMin.HasValue)
+            query = query.Where(p => p.Price > 0 && p.Area > 0 && p.Price / p.Area >= pricePerSqmMin.Value);
+        if (pricePerSqmMax.HasValue)
+            query = query.Where(p => p.Price > 0 && p.Area > 0 && p.Price / p.Area <= pricePerSqmMax.Value);
+
+        // Column-level date filters
+        if (pubDateFrom.HasValue)   query = query.Where(p => p.PublicationDate >= pubDateFrom.Value);
+        if (pubDateTo.HasValue)     query = query.Where(p => p.PublicationDate <= pubDateTo.Value);
+        if (firstSeenFrom.HasValue) query = query.Where(p => p.FirstSeenAt >= firstSeenFrom.Value);
+        if (firstSeenTo.HasValue)   query = query.Where(p => p.FirstSeenAt <= firstSeenTo.Value);
 
         var totalCount = await query.CountAsync();
 
@@ -264,6 +307,7 @@ public class PropertyMetricsController : ControllerBase
                 p.TimesScraped,
                 p.ListingStatus,
                 p.SourceUrl,
+                p.IsArriendo,
                 daysOnMarket = p.PublicationDate.HasValue
                     ? (int?)Math.Round((DateTime.UtcNow - p.PublicationDate.Value).TotalDays)
                     : p.FirstSeenAt.HasValue
@@ -328,6 +372,7 @@ public class PropertyMetricsController : ControllerBase
                 p.ListingStatus,
                 p.PreviousPrice,
                 p.PriceChangedAt,
+                p.IsArriendo,
                 daysOnMarket = p.PublicationDate.HasValue
                     ? (int?)Math.Round((DateTime.UtcNow - p.PublicationDate.Value).TotalDays)
                     : p.FirstSeenAt.HasValue

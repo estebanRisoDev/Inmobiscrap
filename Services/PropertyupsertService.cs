@@ -243,6 +243,7 @@ public class PropertyUpsertService : IPropertyUpsertService
                 Neighborhood    = scraped.Neighborhood,
                 PublicationDate = scraped.PublicationDate,
                 Condition       = scraped.Condition,
+                IsArriendo      = scraped.IsArriendo,
                 HasChanges      = false,
                 ChangedFields   = null,
             });
@@ -327,6 +328,14 @@ public class PropertyUpsertService : IPropertyUpsertService
             existing.Condition = scraped.Condition;
         }
 
+        if (scraped.IsArriendo.HasValue
+            && existing.IsArriendo.HasValue
+            && scraped.IsArriendo != existing.IsArriendo)
+        {
+            changedFields.Add("IsArriendo");
+            existing.IsArriendo = scraped.IsArriendo;
+        }
+
         // Enriquecer campos que antes eran null
         if (string.IsNullOrEmpty(existing.Region)       && !string.IsNullOrEmpty(scraped.Region))       existing.Region       = scraped.Region;
         if (string.IsNullOrEmpty(existing.Neighborhood) && !string.IsNullOrEmpty(scraped.Neighborhood)) existing.Neighborhood = scraped.Neighborhood;
@@ -335,6 +344,7 @@ public class PropertyUpsertService : IPropertyUpsertService
         if (string.IsNullOrEmpty(existing.SourceUrl)    && !string.IsNullOrEmpty(scraped.SourceUrl))    existing.SourceUrl    = scraped.SourceUrl;
         if (existing.Condition == null && !string.IsNullOrWhiteSpace(scraped.Condition)) existing.Condition = scraped.Condition;
         if (!existing.PublicationDate.HasValue && scraped.PublicationDate.HasValue) existing.PublicationDate = scraped.PublicationDate;
+        if (!existing.IsArriendo.HasValue && scraped.IsArriendo.HasValue) existing.IsArriendo = scraped.IsArriendo;
 
         var hasChanges = changedFields.Count > 0;
 
@@ -355,6 +365,7 @@ public class PropertyUpsertService : IPropertyUpsertService
             Neighborhood    = existing.Neighborhood,
             PublicationDate = existing.PublicationDate,
             Condition       = existing.Condition,
+            IsArriendo      = existing.IsArriendo,
             HasChanges      = hasChanges,
             ChangedFields   = hasChanges ? string.Join(",", changedFields) : null,
         });

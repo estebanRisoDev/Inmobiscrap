@@ -87,7 +87,13 @@ builder.Services.AddAuthentication(options =>
     };
 });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("ProOrAdmin", policy =>
+        policy.RequireAssertion(context =>
+            context.User.IsInRole("admin") ||
+            context.User.HasClaim("plan", "pro")));
+});
 
 // ── AWS BEDROCK ───────────────────────────────────────────────────────────────
 var awsAccessKey = Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID");
@@ -120,6 +126,9 @@ builder.Services.AddScoped<IPropertyUpsertService, PropertyUpsertService>();
 builder.Services.AddScoped<IReportService, ReportService>(); 
 builder.Services.AddScoped<ScrapingJob>();
 builder.Services.AddScoped<SubscriptionExpiryJob>();
+builder.Services.AddScoped<IPropertyVerificationService, PropertyVerificationService>();
+builder.Services.AddScoped<PropertyVerificationJob>();
+builder.Services.AddSingleton<IVerificationJobStatus, VerificationJobStatus>();
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -330,6 +339,11 @@ using (var scope = app.Services.CreateScope())
         "check-subscription-expiry",
         job => job.CheckAndExpireSubscriptionsAsync(),
         Cron.Daily());
+
+    recurringJobs.AddOrUpdate<PropertyVerificationJob>(
+        "verify-sold-properties",
+        job => job.ExecuteAsync(),
+        Cron.Daily(3, 0)); // Ejecutar diariamente a las 3:00 AM
 }
 
 var port = Environment.GetEnvironmentVariable("API_PORT") ?? "5000";
