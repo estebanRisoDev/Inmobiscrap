@@ -13,6 +13,7 @@ public class ApplicationDbContext : DbContext
     public DbSet<Bot>              Bots       { get; set; } = null!;
     public DbSet<User>             Users      { get; set; } = null!;
     public DbSet<Payment>          Payments   { get; set; } = null!;
+    public DbSet<PriceAlert>       PriceAlerts { get; set; } = null!;
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -149,6 +150,28 @@ public class ApplicationDbContext : DbContext
 
             entity.HasIndex(u => u.Email).IsUnique().HasDatabaseName("IX_Users_Email");
             entity.HasIndex(u => u.GoogleId).HasDatabaseName("IX_Users_GoogleId");
+        });
+
+        // ============ PRICE ALERT ============
+        modelBuilder.Entity<PriceAlert>(entity =>
+        {
+            entity.Property(a => a.CreatedAt).HasDefaultValueSql("NOW()");
+
+            entity.HasOne(a => a.User)
+                  .WithMany()
+                  .HasForeignKey(a => a.UserId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Property)
+                  .WithMany()
+                  .HasForeignKey(a => a.PropertyId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasIndex(a => a.UserId).HasDatabaseName("IX_PriceAlerts_UserId");
+            entity.HasIndex(a => a.PropertyId).HasDatabaseName("IX_PriceAlerts_PropertyId");
+            entity.HasIndex(a => new { a.UserId, a.PropertyId })
+                  .IsUnique()
+                  .HasDatabaseName("IX_PriceAlerts_UserId_PropertyId");
         });
     }
 }

@@ -24,24 +24,29 @@ public class AnalyticsController : ControllerBase
     private async Task<IActionResult?> ConsumeCredits(int amount = 5)
     {
         var userId = GetUserId();
-        var user = await _context.Users.FindAsync(userId);
-        if (user == null) return Unauthorized();
 
+        var user = await _context.Users
+            .AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => new { u.Plan, u.Role, u.Credits })
+            .FirstOrDefaultAsync();
+
+        if (user == null) return Unauthorized();
         if (user.Plan == "pro" || user.Role == "admin") return null;
 
-        if (user.Credits < amount)
-        {
+        var rows = await _context.Users
+            .Where(u => u.Id == userId && u.Credits >= amount)
+            .ExecuteUpdateAsync(s => s.SetProperty(u => u.Credits, u => u.Credits - amount));
+
+        if (rows == 0)
             return StatusCode(402, new
             {
                 message = $"Créditos insuficientes. Necesitas {amount}, tienes {user.Credits}.",
                 credits = user.Credits,
                 plan = user.Plan,
             });
-        }
 
-        user.Credits -= amount;
-        await _context.SaveChangesAsync();
-        HttpContext.Response.Headers.Append("X-Credits-Remaining", user.Credits.ToString());
+        HttpContext.Response.Headers.Append("X-Credits-Remaining", (user.Credits - amount).ToString());
         return null;
     }
 

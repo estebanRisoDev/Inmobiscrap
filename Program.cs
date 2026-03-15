@@ -129,6 +129,8 @@ builder.Services.AddScoped<SubscriptionExpiryJob>();
 builder.Services.AddScoped<IPropertyVerificationService, PropertyVerificationService>();
 builder.Services.AddScoped<PropertyVerificationJob>();
 builder.Services.AddSingleton<IVerificationJobStatus, VerificationJobStatus>();
+builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<PriceAlertJob>();
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -344,6 +346,11 @@ using (var scope = app.Services.CreateScope())
         "verify-sold-properties",
         job => job.ExecuteAsync(),
         Cron.Daily(3, 0)); // Ejecutar diariamente a las 3:00 AM
+
+    recurringJobs.AddOrUpdate<PriceAlertJob>(
+        "send-price-alerts",
+        job => job.ExecuteAsync(),
+        Cron.Daily(8, 0)); // Enviar alertas de precio diariamente a las 8:00 AM
 }
 
 var port = Environment.GetEnvironmentVariable("API_PORT") ?? "5000";
