@@ -958,12 +958,72 @@ public class ScraperService : IScraperService
         // Espera post-scroll para capturar lazy-loaded API calls
         await page.WaitForTimeoutAsync(2000);
 
-        // CLAVE: Leer el texto visible directamente del DOM renderizado.
-        // Esto captura TODO lo que JS renderizó, sin depender de HTML parsing.
+        // CLAVE: Leer el texto visible directamente del DOM renderizado,
+        // preservando los href de <a> como [link:URL] para que Bedrock y el
+        // fallback de proximidad puedan asociar URLs a propiedades.
         var domInnerText = "";
         try
         {
-            domInnerText = await page.EvaluateAsync<string>("document.body?.innerText ?? ''") ?? "";
+            domInnerText = await page.EvaluateAsync<string>(@"
+                (() => {
+                    const SKIP = new Set(['SCRIPT','STYLE','SVG','NOSCRIPT','HEAD','LINK','META','IFRAME','CANVAS','VIDEO','AUDIO','TEMPLATE']);
+                    const BLOCK = new Set(['DIV','P','LI','TR','ARTICLE','SECTION','HEADER','FOOTER','MAIN','NAV','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','FIGURE','FIGCAPTION','DETAILS','SUMMARY','DL','DT','DD','UL','OL','TABLE','THEAD','TBODY','TFOOT','TD','TH','HR','BR','PRE','ADDRESS','FORM','FIELDSET']);
+
+                    function walk(node) {
+                        if (!node) return '';
+                        // Text node
+                        if (node.nodeType === 3) {
+                            const t = node.textContent.trim();
+                            return t ? t + ' ' : '';
+                        }
+                        if (node.nodeType !== 1) return '';
+                        const tag = node.tagName;
+                        if (SKIP.has(tag)) return '';
+
+                        // Check visibility
+                        const style = window.getComputedStyle(node);
+                        if (style.display === 'none' || style.visibility === 'hidden') return '';
+
+                        let result = '';
+                        const isBlock = BLOCK.has(tag);
+                        if (isBlock) result += '\n';
+
+                        // Emit [link:URL] BEFORE child text for <a> tags
+                        if (tag === 'A') {
+                            const href = node.getAttribute('href') || '';
+                            if (href && !href.startsWith('javascript:') && href !== '#') {
+                                try {
+                                    const abs = new URL(href, document.baseURI).href;
+                                    result += ' [link:' + abs + '] ';
+                                } catch(e) {
+                                    if (href.startsWith('http')) result += ' [link:' + href + '] ';
+                                }
+                            }
+                        }
+
+                        // Extract data-* attributes that may contain property data
+                        for (const attr of node.attributes) {
+                            if (attr.name.startsWith('data-') && attr.value.length > 1 && attr.value.length < 500
+                                && !attr.name.includes('testid') && !attr.name.includes('tracking') && !attr.name.includes('analytics')) {
+                                result += ' [' + attr.name + '=' + attr.value + '] ';
+                            }
+                        }
+
+                        for (const child of node.childNodes) {
+                            result += walk(child);
+                        }
+
+                        if (isBlock) result += '\n';
+                        return result;
+                    }
+
+                    let text = walk(document.body);
+                    // Clean up whitespace
+                    text = text.replace(/[ \t]+/g, ' ');
+                    text = text.replace(/\n{3,}/g, '\n\n');
+                    return text.split('\n').map(l => l.trim()).filter(l => l.length > 1).join('\n').trim();
+                })()
+            ") ?? "";
             Console.WriteLine($"[PW-DOM] innerText length: {domInnerText.Length}");
 
             // Log de preview para debug
