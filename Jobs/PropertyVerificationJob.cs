@@ -21,17 +21,18 @@ public class PropertyVerificationJob
 
     /// <summary>
     /// Job recurrente de Hangfire: verifica propiedades que no han sido
-    /// vistas en 3+ días haciendo ping HTTP a su SourceUrl.
-    /// Batch de 50 por ejecución para no saturar.
+    /// vistas en 2+ días haciendo ping HTTP a su SourceUrl.
+    /// Batch dinámico basado en el total de propiedades activas.
+    /// Se ejecuta 2x/día (3:00 AM y 3:00 PM UTC).
     /// </summary>
     public async Task ExecuteAsync()
     {
-        _logger.LogInformation("PropertyVerificationJob: Starting daily verification...");
+        _logger.LogInformation("PropertyVerificationJob: Starting verification run...");
 
         try
         {
             var (verified, sold, active, errors) = await _verificationService
-                .VerifyStalePropertiesAsync(staleDays: 3, batchSize: 50);
+                .VerifyStalePropertiesAsync(staleDays: 2, batchSize: 0);
 
             _jobStatus.RecordRun(DateTime.UtcNow, verified, sold, active, errors);
 

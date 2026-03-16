@@ -3,6 +3,7 @@ using Inmobiscrap.Data;
 using Inmobiscrap.Services;
 using Inmobiscrap.Jobs;
 using Inmobiscrap.Hubs;
+using Inmobiscrap.Filters;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
@@ -28,6 +29,7 @@ builder.Services.AddCors(options =>
             "http://localhost:3001",
             "http://127.0.0.1:3000",
             "http://127.0.0.1:3001",
+            "https://app.prismainmobiliario.cl",
         };
 
         // Include FRONTEND_URL so MP redirect origin is allowed
@@ -132,6 +134,7 @@ builder.Services.AddSingleton<IVerificationJobStatus, VerificationJobStatus>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<PriceAlertJob>();
 
+builder.Services.AddScoped<DevelopmentOnlyFilter>();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
@@ -343,9 +346,14 @@ using (var scope = app.Services.CreateScope())
         Cron.Daily());
 
     recurringJobs.AddOrUpdate<PropertyVerificationJob>(
-        "verify-sold-properties",
+        "verify-sold-properties-am",
         job => job.ExecuteAsync(),
-        Cron.Daily(3, 0)); // Ejecutar diariamente a las 3:00 AM
+        Cron.Daily(3, 0)); // 3:00 AM UTC
+
+    recurringJobs.AddOrUpdate<PropertyVerificationJob>(
+        "verify-sold-properties-pm",
+        job => job.ExecuteAsync(),
+        Cron.Daily(15, 0)); // 3:00 PM UTC
 
     recurringJobs.AddOrUpdate<PriceAlertJob>(
         "send-price-alerts",

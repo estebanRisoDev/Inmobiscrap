@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Inmobiscrap.Data;
+using Inmobiscrap.Filters;
 using Inmobiscrap.Jobs;
 using Inmobiscrap.Models;
 
@@ -13,6 +14,7 @@ public record SetNextBillingRequest(DateTime Date);
 [ApiController]
 [Route("api/admin/subscriptions")]
 [Authorize(Roles = "admin")]
+[ServiceFilter(typeof(DevelopmentOnlyFilter))]
 public class SubscriptionTestController : ControllerBase
 {
     private readonly ApplicationDbContext _context;

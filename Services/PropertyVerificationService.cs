@@ -2,6 +2,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Inmobiscrap.Data;
 using Inmobiscrap.Models;
+using Inmobiscrap.Hubs;
+using Microsoft.AspNetCore.SignalR;
 
 namespace Inmobiscrap.Services;
 
@@ -17,9 +19,10 @@ public interface IPropertyVerificationService
     /// <summary>
     /// Verifica propiedades que no han sido vistas en X días haciendo
     /// HTTP GET a su SourceUrl. Marca como "sold" si 404/redirect/vendido.
+    /// batchSize=0 usa batch dinámico basado en el total de propiedades activas.
     /// </summary>
     Task<(int verified, int sold, int active, int errors)> VerifyStalePropertiesAsync(
-        int staleDays = 3, int batchSize = 50, CancellationToken ct = default);
+        int staleDays = 2, int batchSize = 0, CancellationToken ct = default);
 
     /// <summary>Verifica una propiedad individual por ID.</summary>
     Task<VerificationResult> VerifySinglePropertyAsync(int propertyId, CancellationToken ct = default);
@@ -37,7 +40,7 @@ public class PropertyVerificationService : IPropertyVerificationService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<PropertyVerificationService> _logger;
 
-    // Palabras clave que indican propiedad vendida/finalizada
+    // Palabras clave que indican propiedad vendida/finalizada/reservada
     private static readonly string[] _soldKeywords = new[]
     {
         "vendido", "vendida", "no disponible", "publicación finalizada",
@@ -45,21 +48,36 @@ public class PropertyVerificationService : IPropertyVerificationService
         "esta propiedad ya no está disponible", "listing has ended",
         "ya fue vendida", "ya se vendió", "no longer available",
         "removed", "expired", "finalizado", "cerrado",
+        "reservado", "reservada", "en proceso de venta", "bajo promesa",
+        "arrendado", "arrendada", "alquilado", "alquilada",
     };
+
+    private readonly IHubContext<BotLogHub> _hubContext;
 
     public PropertyVerificationService(
         ApplicationDbContext context,
         IHttpClientFactory httpClientFactory,
-        ILogger<PropertyVerificationService> logger)
+        ILogger<PropertyVerificationService> logger,
+        IHubContext<BotLogHub> hubContext)
     {
         _context = context;
         _httpClientFactory = httpClientFactory;
         _logger = logger;
+        _hubContext = hubContext;
     }
 
     public async Task<(int verified, int sold, int active, int errors)> VerifyStalePropertiesAsync(
-        int staleDays = 3, int batchSize = 50, CancellationToken ct = default)
+        int staleDays = 2, int batchSize = 0, CancellationToken ct = default)
     {
+        // Batch dinámico: si batchSize=0, calcular basado en total activas
+        if (batchSize <= 0)
+        {
+            var totalActive = await _context.Properties
+                .CountAsync(p => p.ListingStatus != "sold" && p.SourceUrl != null, ct);
+            // ~5% del total, mínimo 50, máximo 200
+            batchSize = Math.Clamp(totalActive / 20, 50, 200);
+        }
+
         var cutoff = DateTime.UtcNow.AddDays(-staleDays);
 
         // Propiedades candidatas: tienen SourceUrl, no están ya vendidas,
@@ -70,8 +88,8 @@ public class PropertyVerificationService : IPropertyVerificationService
                      && p.LastSeenAt != null
                      && p.LastSeenAt < cutoff
                      && p.TimesScraped > 0
-                     // No verificar si ya se verificó hoy
-                     && (p.LastVerifiedAt == null || p.LastVerifiedAt < DateTime.UtcNow.AddHours(-20)))
+                     // No verificar si ya se verificó en las últimas 10 horas
+                     && (p.LastVerifiedAt == null || p.LastVerifiedAt < DateTime.UtcNow.AddHours(-10)))
             .OrderBy(p => p.LastVerifiedAt ?? DateTime.MinValue) // primero las nunca verificadas
             .Take(batchSize)
             .ToListAsync(ct);
@@ -82,8 +100,9 @@ public class PropertyVerificationService : IPropertyVerificationService
             return (0, 0, 0, 0);
         }
 
-        _logger.LogInformation("PropertyVerification: Verifying {Count} stale properties (cutoff: {Cutoff})",
-            candidates.Count, cutoff);
+        _logger.LogInformation("PropertyVerification: Verifying {Count} stale properties (cutoff: {Cutoff}, batch: {Batch})",
+            candidates.Count, cutoff, batchSize);
+        await BroadcastVerificationLog($"Iniciando verificación de {candidates.Count} propiedades (stale>{staleDays}d, batch={batchSize})");
 
         int sold = 0, active = 0, errors = 0;
 
@@ -106,6 +125,7 @@ public class PropertyVerificationService : IPropertyVerificationService
                         sold++;
                         _logger.LogInformation("PropertyVerification: SOLD - {Title} ({Url})",
                             property.Title, property.SourceUrl);
+                        await BroadcastVerificationLog($"VENDIDA: {property.Title}");
                     }
                     else
                     {
@@ -123,6 +143,7 @@ public class PropertyVerificationService : IPropertyVerificationService
                     break;
 
                 case VerificationResult.NetworkError:
+                    // No incrementar ConsecutiveMisses por error de red (WAF, captcha, downtime temporal)
                     errors++;
                     break;
             }
@@ -133,9 +154,10 @@ public class PropertyVerificationService : IPropertyVerificationService
 
         await _context.SaveChangesAsync(ct);
 
-        _logger.LogInformation(
-            "PropertyVerification: Done. Verified={Verified}, Sold={Sold}, Active={Active}, Errors={Errors}",
+        var summary = $"Verificación completada: {candidates.Count} verificadas, {sold} vendidas, {active} activas, {errors} errores";
+        _logger.LogInformation("PropertyVerification: Done. Verified={Verified}, Sold={Sold}, Active={Active}, Errors={Errors}",
             candidates.Count, sold, active, errors);
+        await BroadcastVerificationLog(summary);
 
         return (candidates.Count, sold, active, errors);
     }
@@ -202,7 +224,7 @@ public class PropertyVerificationService : IPropertyVerificationService
         try
         {
             var client = _httpClientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromSeconds(15);
+            client.Timeout = TimeSpan.FromSeconds(25);
             client.DefaultRequestHeaders.UserAgent.ParseAdd(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
             client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("es-CL,es;q=0.9");
@@ -210,7 +232,7 @@ public class PropertyVerificationService : IPropertyVerificationService
             // No seguir redirects automáticamente para detectar 301→homepage
             var handler = new HttpClientHandler { AllowAutoRedirect = false };
             using var noRedirectClient = new HttpClient(handler);
-            noRedirectClient.Timeout = TimeSpan.FromSeconds(15);
+            noRedirectClient.Timeout = TimeSpan.FromSeconds(25);
             noRedirectClient.DefaultRequestHeaders.UserAgent.ParseAdd(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
 
@@ -244,11 +266,19 @@ public class PropertyVerificationService : IPropertyVerificationService
                 var fullResponse = await client.GetAsync(url, ct);
                 var body = await fullResponse.Content.ReadAsStringAsync(ct);
 
+                // Detectar Cloudflare/captcha challenge → no es indicador de venta
+                if (IsWafOrCaptchaPage(body))
+                    return VerificationResult.NetworkError;
+
                 if (body.Length < 500)
                     return VerificationResult.Sold; // Página casi vacía = removida
 
                 return ContainsSoldKeywords(body) ? VerificationResult.Sold : VerificationResult.StillActive;
             }
+
+            // 403 con posible WAF/captcha → tratar como error de red, no como venta
+            if (statusCode == 403)
+                return VerificationResult.NetworkError;
 
             // Otros status codes (5xx, etc.)
             return VerificationResult.NetworkError;
@@ -293,5 +323,34 @@ public class PropertyVerificationService : IPropertyVerificationService
     {
         var lower = htmlBody.ToLowerInvariant();
         return _soldKeywords.Any(keyword => lower.Contains(keyword));
+    }
+
+    private static bool IsWafOrCaptchaPage(string htmlBody)
+    {
+        var lower = htmlBody.ToLowerInvariant();
+        return lower.Contains("cf-browser-verification")
+            || lower.Contains("cloudflare")
+            || lower.Contains("captcha")
+            || lower.Contains("recaptcha")
+            || lower.Contains("hcaptcha")
+            || lower.Contains("challenge-platform")
+            || lower.Contains("just a moment");
+    }
+
+    private async Task BroadcastVerificationLog(string message)
+    {
+        try
+        {
+            await _hubContext.Clients.Group("Dashboard_Global")
+                .SendAsync("ReceiveVerificationLog", new
+                {
+                    message,
+                    timestamp = DateTime.UtcNow,
+                });
+        }
+        catch
+        {
+            // No fallar la verificación por un error de broadcast
+        }
     }
 }

@@ -261,8 +261,10 @@ public class ScraperService : IScraperService
             await _botLogService.LogInfoAsync(bot.Id, bot.Name, "🤖 Sending to AWS Bedrock (Claude AI) for processing");
             scrapedProperties = await ExtractPropertiesWithBedrock(compactText, bot);
 
+            var withUrl = scrapedProperties.Count(p => !string.IsNullOrWhiteSpace(p.SourceUrl));
+            var withCondition = scrapedProperties.Count(p => !string.IsNullOrWhiteSpace(p.Condition));
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
-                $"✅ AI processing completed: {scrapedProperties.Count} properties found");
+                $"✅ AI processing completed: {scrapedProperties.Count} properties found (URLs: {withUrl}, Condition: {withCondition})");
 
             if (await IsBotStoppingAsync(bot.Id))
             {
@@ -290,6 +292,22 @@ public class ScraperService : IScraperService
                 }
 
                 var property = scrapedProperties[i];
+
+                // Inferir condition desde la URL del bot si Bedrock no lo detectó
+                if (string.IsNullOrWhiteSpace(property.Condition))
+                {
+                    var inferredCondition = InferConditionFromUrl(bot.Url);
+                    if (inferredCondition != null)
+                        property.Condition = inferredCondition;
+                }
+
+                // Inferir isArriendo desde la URL del bot si Bedrock no lo detectó
+                if (!property.IsArriendo.HasValue)
+                {
+                    var inferredArriendo = InferIsArriendoFromUrl(bot.Url);
+                    if (inferredArriendo.HasValue)
+                        property.IsArriendo = inferredArriendo;
+                }
 
                 await _botLogService.SendProgressAsync(bot.Id, bot.Name, i + 1, scrapedProperties.Count,
                     $"Processing: {property.Title?.Substring(0, Math.Min(40, property.Title?.Length ?? 0))}...");
@@ -678,24 +696,24 @@ public class ScraperService : IScraperService
         }
 
         // Preservar href de links — resolver relativos a absolutos
-        string? href = null;
+        // IMPORTANTE: Emitir [link:URL] ANTES del contenido hijo para que
+        // en el chunking el URL quede asociado al inicio del card de propiedad.
         if (tag == "a")
         {
-            href = node.GetAttributeValue("href", "").Trim();
-            if (string.IsNullOrEmpty(href) || href.StartsWith("javascript:") || href == "#")
-                href = null;
-            else if (href != null && baseUri != null && !href.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            var href = node.GetAttributeValue("href", "").Trim();
+            if (!string.IsNullOrEmpty(href) && !href.StartsWith("javascript:") && href != "#")
             {
-                if (Uri.TryCreate(baseUri, href, out var absoluteUri))
-                    href = absoluteUri.ToString();
+                if (baseUri != null && !href.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (Uri.TryCreate(baseUri, href, out var absoluteUri))
+                        href = absoluteUri.ToString();
+                }
+                sb.Append($" [link:{href}] ");
             }
         }
 
         foreach (var child in node.ChildNodes)
             WalkNode(child, sb, baseUri);
-
-        if (href != null)
-            sb.Append($" [link:{href}] ");
 
         if (isBlock) sb.AppendLine();
     }
@@ -1111,10 +1129,84 @@ public class ScraperService : IScraperService
             }
 
             var preview = chunks[i].Length > 200 ? chunks[i][..200] + "…" : chunks[i];
+
+            // Contar URLs presentes en el chunk para diagnóstico
+            var linkCount = Regex.Matches(chunks[i], @"\[link:https?://[^\]]+\]").Count;
+            var urlFieldCount = Regex.Matches(chunks[i], @"(?:url|permalink|href|link|canonical):\s*https?://", RegexOptions.IgnoreCase).Count;
             await _botLogService.LogInfoAsync(bot.Id, bot.Name,
-                $"🤖 Processing chunk {i + 1}/{chunks.Count} ({chunks[i].Length:N0} chars)...\nPreview: {preview}");
+                $"🤖 Processing chunk {i + 1}/{chunks.Count} ({chunks[i].Length:N0} chars, {linkCount} [link:] tags, {urlFieldCount} url fields)...\nPreview: {preview}");
 
             var chunkProperties = await ProcessChunkWithBedrock(chunks[i], bot, modelId);
+
+            // ── Fallback: asignar sourceUrl por proximidad en el texto ──
+            // Si Bedrock no extrajo el URL, buscamos el [link:URL] más cercano
+            // al título de la propiedad en el chunk original.
+            var propertiesWithoutUrl = chunkProperties.Where(p => string.IsNullOrWhiteSpace(p.SourceUrl)).ToList();
+            if (propertiesWithoutUrl.Count > 0 && (linkCount > 0 || urlFieldCount > 0))
+            {
+                // Recopilar URLs de [link:URL] y de campos "url/permalink/href: URL" en datos embebidos
+                var linkMatches = Regex.Matches(chunks[i], @"\[link:(https?://[^\]]+)\]");
+                var fieldMatches = Regex.Matches(chunks[i], @"(?:url|permalink|href|canonicalUrl|link):\s*(https?://\S+)", RegexOptions.IgnoreCase);
+
+                var allLinks = linkMatches
+                    .Select(m => new { Url = m.Groups[1].Value.Trim(), Position = m.Index })
+                    .Concat(fieldMatches.Select(m => new { Url = m.Groups[1].Value.Trim(), Position = m.Index }))
+                    .GroupBy(l => l.Url, StringComparer.OrdinalIgnoreCase)
+                    .Select(g => g.First())
+                    .ToList();
+
+                // No usar links que ya fueron asignados por Bedrock
+                var usedUrls = new HashSet<string>(
+                    chunkProperties.Where(p => !string.IsNullOrWhiteSpace(p.SourceUrl))
+                                   .Select(p => p.SourceUrl!),
+                    StringComparer.OrdinalIgnoreCase);
+
+                // Filtrar: no usar la URL del bot (es la página de listados)
+                var botUrlNorm = bot.Url.Trim().TrimEnd('/').ToLowerInvariant();
+                var availableLinks = allLinks
+                    .Where(l => !usedUrls.Contains(l.Url)
+                             && !l.Url.Trim().TrimEnd('/').Equals(botUrlNorm, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                foreach (var prop in propertiesWithoutUrl)
+                {
+                    if (availableLinks.Count == 0) break;
+                    if (string.IsNullOrWhiteSpace(prop.Title)) continue;
+
+                    // Buscar la posición del título en el chunk
+                    var titleIdx = chunks[i].IndexOf(prop.Title, StringComparison.OrdinalIgnoreCase);
+                    if (titleIdx < 0 && prop.Title.Length > 15)
+                    {
+                        // Intentar con un fragmento del título (primeras palabras)
+                        var titleFragment = prop.Title.Length > 30 ? prop.Title[..30] : prop.Title;
+                        titleIdx = chunks[i].IndexOf(titleFragment, StringComparison.OrdinalIgnoreCase);
+                    }
+
+                    if (titleIdx >= 0)
+                    {
+                        // Asignar el link más cercano al título
+                        var nearest = availableLinks
+                            .OrderBy(l => Math.Abs(l.Position - titleIdx))
+                            .First();
+
+                        prop.SourceUrl = nearest.Url;
+                        availableLinks.Remove(nearest);
+                    }
+                }
+            }
+
+            // Diagnóstico: loguear sourceUrl de cada propiedad extraída
+            var chunkWithUrl = chunkProperties.Count(p => !string.IsNullOrWhiteSpace(p.SourceUrl));
+            if (chunkProperties.Count > 0 && chunkWithUrl == 0)
+            {
+                await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                    $"⚠️ Chunk {i + 1}: {chunkProperties.Count} propiedades extraídas pero NINGUNA tiene sourceUrl (links en texto: {linkCount})");
+            }
+            else if (chunkProperties.Count > 0)
+            {
+                await _botLogService.LogDebugAsync(bot.Id, bot.Name,
+                    $"🔗 Chunk {i + 1}: {chunkWithUrl}/{chunkProperties.Count} con sourceUrl. Ejemplo: {chunkProperties.FirstOrDefault(p => p.SourceUrl != null)?.SourceUrl ?? "n/a"}");
+            }
 
             int added = 0;
         foreach (var prop in chunkProperties)
@@ -1151,6 +1243,8 @@ public class ScraperService : IScraperService
     private async Task<List<Property>> ProcessChunkWithBedrock(string chunkText, Bot bot, string modelId)
     {
         var prompt = $@"Analiza el siguiente texto extraído de una página web de bienes raíces chilena.
+La URL de origen de la página es: {bot.Url}
+
 El texto puede contener:
 - URLs entre corchetes como [link:https://...]
 - Datos estructurados con formato ""campo: valor"" extraídos de APIs o JSON embebido
@@ -1163,7 +1257,11 @@ las propiedades inmobiliarias únicas dentro del contenido.
 
 Extrae TODAS las propiedades inmobiliarias que encuentres. Para cada una:
 - title: Título o descripción de la propiedad
-- sourceUrl: URL completa de la propiedad individual (busca en [link:...] o en campos como url, permalink, href). IMPORTANTE: debe ser la URL del detalle de la propiedad, NO la URL de la página de resultados/listados.
+- sourceUrl: URL completa de la propiedad individual. Busca en:
+  1. [link:...] — URLs de enlaces <a> del HTML
+  2. Campos como url, permalink, href, canonicalUrl en datos embebidos
+  3. Si encuentras un ID o slug de propiedad, intenta construir la URL completa usando el dominio de la URL de origen
+  IMPORTANTE: debe ser la URL del detalle de la propiedad, NO la URL de la página de resultados/listados. Es CRÍTICO extraer esta URL para cada propiedad.
 - price: Precio (solo número, sin puntos ni comas)
 - currency: Moneda detectada (CLP, UF, USD) — por defecto CLP
 - address: Dirección
@@ -1176,8 +1274,12 @@ Extrae TODAS las propiedades inmobiliarias que encuentres. Para cada una:
 - propertyType: Tipo (departamento, casa, oficina, terreno, local, etc.)
 - description: Descripción breve
 - publicationDate: Fecha de publicación del aviso (formato ISO: YYYY-MM-DD si está disponible)
-- condition: Estado de la propiedad: ""Nuevo"" o ""Usado"" (si está indicado en el aviso)
-- isArriendo: true si la propiedad es en arriendo/alquiler/renta, false si es en venta/compra, null si no es posible determinarlo con certeza
+- condition: Estado de la propiedad: ""Nuevo"" o ""Usado"". Para determinar esto:
+  1. Busca indicadores explícitos como ""Nuevo"", ""Usado"", ""Estrenar"", ""Segunda mano"" en cada aviso
+  2. Si la URL de origen contiene palabras como ""nuevo"", ""nuevos"", ""estrenar"" → todas las propiedades son ""Nuevo""
+  3. Si la URL de origen contiene palabras como ""usado"", ""usados"", ""segunda-mano"" → todas las propiedades son ""Usado""
+  4. Si no hay ningún indicador, usa null
+- isArriendo: true si la propiedad es en arriendo/alquiler/renta, false si es en venta/compra, null si no es posible determinarlo con certeza. Pista: si la URL de origen contiene ""arriendo"" o ""alquiler"" → true; si contiene ""venta"" → false.
 
 Reglas:
 - Si un campo no está presente, usa null (no inventes datos)
@@ -1341,6 +1443,40 @@ TEXTO:
                 IsArriendo      = false
             }
         };
+
+    /// <summary>
+    /// Infiere la condición (Nuevo/Usado) a partir de la URL del bot.
+    /// </summary>
+    private static string? InferConditionFromUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        var lower = url.ToLowerInvariant();
+
+        if (lower.Contains("nuevo") || lower.Contains("estrenar") || lower.Contains("/new"))
+            return "Nuevo";
+        if (lower.Contains("usado") || lower.Contains("segunda-mano") || lower.Contains("/used"))
+            return "Usado";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Infiere si es arriendo o venta a partir de la URL del bot.
+    /// </summary>
+    private static bool? InferIsArriendoFromUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        var lower = url.ToLowerInvariant();
+
+        if (lower.Contains("arriendo") || lower.Contains("alquiler") || lower.Contains("renta")
+            || lower.Contains("/rent") || lower.Contains("arrendar"))
+            return true;
+        if (lower.Contains("venta") || lower.Contains("compra") || lower.Contains("/sale")
+            || lower.Contains("comprar"))
+            return false;
+
+        return null;
+    }
 
     /// <summary>
     /// Normaliza texto para deduplicación en memoria: lowercase, sin acentos,
