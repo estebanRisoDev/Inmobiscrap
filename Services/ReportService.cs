@@ -762,7 +762,7 @@ public class ReportService : IReportService
 \vfill
 \textcolor{muted}{\rule{\linewidth}{0.4pt}}\\
 {\scriptsize\color{muted}
-  Este informe fue generado automáticamente por \textbf{InmobiScrap}.
+  Este informe fue generado automáticamente por \textbf{PrismaInmobiliario}.
   Los datos provienen de scraping de portales inmobiliarios chilenos y pueden contener imprecisiones.
   Todos los precios en UF y CLP corresponden a la moneda indicada por la fuente original.
 }

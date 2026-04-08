@@ -25,10 +25,8 @@ public class PaymentsController : ControllerBase
     // pack purchases use CheckoutPro (preferences), "pro" uses preapproval
     private static readonly Dictionary<string, (string Name, int AmountCLP, int Credits, bool IsPro)> Plans = new()
     {
-        ["pack50"]   = ("Pack 50 créditos",    2000,   50, false),
-        ["pack100"]  = ("Pack 100 créditos",   3000,  100, false),
-        ["pack1000"] = ("Pack 1000 créditos", 15000, 1000, false),
-        ["pro"]      = ("Plan Pro mensual",  100000,    0, true),   // CLP mensual
+        ["pack100"]  = ("Pack 100 créditos",  2500, 100, false),
+        ["pro"]      = ("Plan Premium mensual", 5000,   0, true),   // CLP mensual
     };
 
     public PaymentsController(
@@ -537,7 +535,7 @@ public class PaymentsController : ControllerBase
                 UserId      = user.Id,
                 Type        = "pro_renewed",
                 Description = "Renovación mensual Plan Pro",
-                AmountCLP   = 100000,
+                AmountCLP   = 5000,
                 Credits     = 0,
                 MpId        = preapprovalId,
                 CreatedAt   = DateTime.UtcNow,
@@ -563,7 +561,7 @@ public class PaymentsController : ControllerBase
             UserId      = user.Id,
             Type        = "pro_activated",
             Description = "Activación Plan Pro mensual",
-            AmountCLP   = 100000,
+            AmountCLP   = 5000,
             Credits     = 0,
             MpId        = preapprovalId,
             CreatedAt   = DateTime.UtcNow,
