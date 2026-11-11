@@ -1,14 +1,20 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Inmobiscrap.Data;
+using Inmobiscrap.Infrastructure;
 using Inmobiscrap.Models;
 using Microsoft.AspNetCore.Authorization;
 
 namespace Inmobiscrap.Controllers;
 
+/// <summary>
+/// CRUD crudo de propiedades. Solo admin: antes cualquier usuario autenticado
+/// podía crear/editar/borrar propiedades (y descargar toda la BD sin gastar
+/// créditos). El dashboard usa /api/metrics/* y /api/analytics/*.
+/// </summary>
 [ApiController]
 [Route("api/[controller]")]
-[Authorize]
+[Authorize(Roles = "admin")]
 public class PropertiesController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
@@ -65,7 +71,7 @@ public class PropertiesController : ControllerBase
     }
 
     // GET: api/properties/5
-    [HttpGet("{id}")]
+    [HttpGet("{id:int}")]
     public async Task<ActionResult<Property>> GetProperty(int id)
     {
         var property = await _context.Properties.FindAsync(id);
@@ -77,17 +83,27 @@ public class PropertiesController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<Property>> CreateProperty(Property property)
     {
+        var error = Validate(property);
+        if (error != null) return BadRequest(new { message = error });
+
+        property.Id = 0; // lo asigna la BD
+        NormalizeDates(property);
+
         _context.Properties.Add(property);
         await _context.SaveChangesAsync();
         return CreatedAtAction(nameof(GetProperty), new { id = property.Id }, property);
     }
 
     // PUT: api/properties/5
-    [HttpPut("{id}")]
+    [HttpPut("{id:int}")]
     public async Task<IActionResult> UpdateProperty(int id, Property property)
     {
         if (id != property.Id) return BadRequest();
 
+        var error = Validate(property);
+        if (error != null) return BadRequest(new { message = error });
+
+        NormalizeDates(property);
         _context.Entry(property).State = EntityState.Modified;
 
         try
@@ -104,7 +120,7 @@ public class PropertiesController : ControllerBase
     }
 
     // DELETE: api/properties/5
-    [HttpDelete("{id}")]
+    [HttpDelete("{id:int}")]
     public async Task<IActionResult> DeleteProperty(int id)
     {
         var property = await _context.Properties.FindAsync(id);
@@ -118,4 +134,23 @@ public class PropertiesController : ControllerBase
 
     private async Task<bool> PropertyExists(int id) =>
         await _context.Properties.AnyAsync(e => e.Id == id);
+
+    private static string? Validate(Property p)
+    {
+        if (string.IsNullOrWhiteSpace(p.Title)) return "El título es requerido.";
+        // SourceUrl se usa para verificar la propiedad desde el servidor: solo http(s)
+        if (!string.IsNullOrWhiteSpace(p.SourceUrl) && !SafeHttp.IsHttpUrl(p.SourceUrl))
+            return "SourceUrl debe ser una URL http(s) válida.";
+        return null;
+    }
+
+    private static void NormalizeDates(Property p)
+    {
+        p.PublicationDate = p.PublicationDate.ToUtc();
+        p.FirstSeenAt     = p.FirstSeenAt.ToUtc();
+        p.LastSeenAt      = p.LastSeenAt.ToUtc();
+        p.PriceChangedAt  = p.PriceChangedAt.ToUtc();
+        p.SoldDetectedAt  = p.SoldDetectedAt.ToUtc();
+        p.LastVerifiedAt  = p.LastVerifiedAt.ToUtc();
+    }
 }

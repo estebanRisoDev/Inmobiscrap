@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Inmobiscrap.Data;
+using Inmobiscrap.Infrastructure;
 using Inmobiscrap.Models;
 using Inmobiscrap.Hubs;
 using Microsoft.AspNetCore.SignalR;
@@ -40,17 +41,40 @@ public class PropertyVerificationService : IPropertyVerificationService
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ILogger<PropertyVerificationService> _logger;
 
-    // Palabras clave que indican propiedad vendida/finalizada/reservada
-    private static readonly string[] _soldKeywords = new[]
+    // Frases específicas que indican aviso vendido/finalizado. Se buscan SOLO en
+    // el texto visible (sin scripts). Antes había palabras sueltas como "removed",
+    // "expired", "cerrado", "vendido" o "no disponible", que aparecen en casi
+    // cualquier página activa ("condominio cerrado", "más vendidos", JS...) y
+    // marcaban como vendidas propiedades que seguían publicadas.
+    private static readonly string[] _soldPhrases = new[]
     {
-        "vendido", "vendida", "no disponible", "publicación finalizada",
-        "publicacion finalizada", "aviso finalizado", "propiedad no encontrada",
-        "esta propiedad ya no está disponible", "listing has ended",
-        "ya fue vendida", "ya se vendió", "no longer available",
-        "removed", "expired", "finalizado", "cerrado",
-        "reservado", "reservada", "en proceso de venta", "bajo promesa",
-        "arrendado", "arrendada", "alquilado", "alquilada",
+        "publicación finalizada", "publicacion finalizada",
+        "publicación pausada", "publicacion pausada",
+        "aviso finalizado", "este aviso finalizó", "este aviso finalizo",
+        "el aviso ya no está disponible", "el aviso ya no esta disponible",
+        "este aviso ya no está disponible", "este aviso ya no esta disponible",
+        "esta publicación ya no está disponible", "esta publicacion ya no esta disponible",
+        "esta propiedad ya no está disponible", "esta propiedad ya no esta disponible",
+        "la propiedad ya no está disponible", "la propiedad ya no esta disponible",
+        "propiedad no encontrada", "publicación no encontrada", "publicacion no encontrada",
+        "ya fue vendida", "ya fue vendido", "ya se vendió", "ya se vendio",
+        "propiedad vendida", "propiedad arrendada",
+        "listing has ended", "this listing is no longer available",
     };
+
+    // Clientes compartidos (antes se creaba un HttpClientHandler por request).
+    // SafeHttp bloquea IPs privadas/metadata: SourceUrl viene de datos scrapeados.
+    private static readonly HttpClient _noRedirectClient = CreateClient(allowRedirect: false);
+    private static readonly HttpClient _redirectClient   = CreateClient(allowRedirect: true);
+
+    private static HttpClient CreateClient(bool allowRedirect)
+    {
+        var client = SafeHttp.CreateClient(allowRedirect, TimeSpan.FromSeconds(25));
+        client.DefaultRequestHeaders.UserAgent.ParseAdd(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
+        client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("es-CL,es;q=0.9");
+        return client;
+    }
 
     private readonly IHubContext<BotLogHub> _hubContext;
 
@@ -221,22 +245,16 @@ public class PropertyVerificationService : IPropertyVerificationService
 
     private async Task<VerificationResult> CheckSourceUrlAsync(string url, CancellationToken ct)
     {
+        if (!SafeHttp.IsHttpUrl(url))
+        {
+            _logger.LogWarning("PropertyVerification: SourceUrl no es http(s): {Url}", url);
+            return VerificationResult.NetworkError;
+        }
+
         try
         {
-            var client = _httpClientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromSeconds(25);
-            client.DefaultRequestHeaders.UserAgent.ParseAdd(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
-            client.DefaultRequestHeaders.AcceptLanguage.ParseAdd("es-CL,es;q=0.9");
-
             // No seguir redirects automáticamente para detectar 301→homepage
-            var handler = new HttpClientHandler { AllowAutoRedirect = false };
-            using var noRedirectClient = new HttpClient(handler);
-            noRedirectClient.Timeout = TimeSpan.FromSeconds(25);
-            noRedirectClient.DefaultRequestHeaders.UserAgent.ParseAdd(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36");
-
-            var response = await noRedirectClient.GetAsync(url, ct);
+            using var response = await _noRedirectClient.GetAsync(url, ct);
             var statusCode = (int)response.StatusCode;
 
             // 404 / 410 → vendida
@@ -251,29 +269,22 @@ public class PropertyVerificationService : IPropertyVerificationService
                     return VerificationResult.Sold;
 
                 // Seguir el redirect y analizar el contenido
-                var finalResponse = await client.GetAsync(url, ct);
-                if (!finalResponse.IsSuccessStatusCode)
+                using var finalResponse = await _redirectClient.GetAsync(url, ct);
+                var finalStatus = (int)finalResponse.StatusCode;
+                if (finalStatus is 404 or 410)
                     return VerificationResult.Sold;
+                if (!finalResponse.IsSuccessStatusCode)
+                    return VerificationResult.NetworkError; // 403/5xx: WAF o caída, no venta
 
-                var body = await finalResponse.Content.ReadAsStringAsync(ct);
-                return ContainsSoldKeywords(body) ? VerificationResult.Sold : VerificationResult.StillActive;
+                var redirectedBody = await finalResponse.Content.ReadAsStringAsync(ct);
+                return AnalyzeBody(redirectedBody);
             }
 
-            // 200 OK — verificar contenido
+            // 200 OK — verificar contenido (se reutiliza el body ya descargado)
             if (response.IsSuccessStatusCode)
             {
-                // Re-descargar con redirect habilitado para obtener el body
-                var fullResponse = await client.GetAsync(url, ct);
-                var body = await fullResponse.Content.ReadAsStringAsync(ct);
-
-                // Detectar Cloudflare/captcha challenge → no es indicador de venta
-                if (IsWafOrCaptchaPage(body))
-                    return VerificationResult.NetworkError;
-
-                if (body.Length < 500)
-                    return VerificationResult.Sold; // Página casi vacía = removida
-
-                return ContainsSoldKeywords(body) ? VerificationResult.Sold : VerificationResult.StillActive;
+                var body = await response.Content.ReadAsStringAsync(ct);
+                return AnalyzeBody(body);
             }
 
             // 403 con posible WAF/captcha → tratar como error de red, no como venta
@@ -319,22 +330,59 @@ public class PropertyVerificationService : IPropertyVerificationService
         return false;
     }
 
-    private static bool ContainsSoldKeywords(string htmlBody)
+    private static VerificationResult AnalyzeBody(string html)
     {
-        var lower = htmlBody.ToLowerInvariant();
-        return _soldKeywords.Any(keyword => lower.Contains(keyword));
+        var visibleText = ExtractVisibleText(html);
+
+        // Challenge de Cloudflare/captcha → no es indicador de venta
+        if (IsWafOrCaptchaPage(html, visibleText))
+            return VerificationResult.NetworkError;
+
+        if (html.Length < 500)
+            return VerificationResult.Sold; // Página casi vacía = removida
+
+        return _soldPhrases.Any(visibleText.Contains)
+            ? VerificationResult.Sold
+            : VerificationResult.StillActive;
     }
 
-    private static bool IsWafOrCaptchaPage(string htmlBody)
+    /// <summary>Texto visible en minúsculas (sin script/style/noscript/template).</summary>
+    private static string ExtractVisibleText(string html)
     {
-        var lower = htmlBody.ToLowerInvariant();
-        return lower.Contains("cf-browser-verification")
-            || lower.Contains("cloudflare")
-            || lower.Contains("captcha")
-            || lower.Contains("recaptcha")
-            || lower.Contains("hcaptcha")
+        try
+        {
+            var doc = new HtmlAgilityPack.HtmlDocument();
+            doc.LoadHtml(html);
+            doc.DocumentNode
+                .Descendants()
+                .Where(n => n.Name is "script" or "style" or "noscript" or "template" or "svg")
+                .ToList()
+                .ForEach(n => n.Remove());
+
+            var text = HtmlAgilityPack.HtmlEntity.DeEntitize(doc.DocumentNode.InnerText);
+            return System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").ToLowerInvariant();
+        }
+        catch
+        {
+            return html.ToLowerInvariant();
+        }
+    }
+
+    private static bool IsWafOrCaptchaPage(string html, string visibleText)
+    {
+        var lower = html.ToLowerInvariant();
+
+        // Marcadores propios de las páginas de challenge (no de un sitio que solo usa el CDN)
+        if (lower.Contains("cf-browser-verification")
             || lower.Contains("challenge-platform")
-            || lower.Contains("just a moment");
+            || lower.Contains("cf-chl-")
+            || lower.Contains("<title>just a moment")
+            || lower.Contains("<title>attention required"))
+            return true;
+
+        // "captcha" solo cuenta si la página casi no tiene contenido (pantalla de bloqueo);
+        // muchas páginas normales incluyen reCAPTCHA en su formulario de contacto.
+        return visibleText.Length < 1500 && visibleText.Contains("captcha");
     }
 
     private async Task BroadcastVerificationLog(string message)

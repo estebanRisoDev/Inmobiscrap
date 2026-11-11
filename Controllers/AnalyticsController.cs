@@ -1,7 +1,7 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Inmobiscrap.Data;
+using Inmobiscrap.Services;
 using Microsoft.AspNetCore.Authorization;
 
 namespace Inmobiscrap.Controllers;
@@ -12,43 +12,16 @@ namespace Inmobiscrap.Controllers;
 public class AnalyticsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly ICreditService _credits;
 
-    public AnalyticsController(ApplicationDbContext context) => _context = context;
-
-    private int GetUserId()
+    public AnalyticsController(ApplicationDbContext context, ICreditService credits)
     {
-        var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        return int.TryParse(claim, out var id) ? id : 0;
+        _context = context;
+        _credits = credits;
     }
 
-    private async Task<IActionResult?> ConsumeCredits(int amount = 5)
-    {
-        var userId = GetUserId();
-
-        var user = await _context.Users
-            .AsNoTracking()
-            .Where(u => u.Id == userId)
-            .Select(u => new { u.Plan, u.Role, u.Credits })
-            .FirstOrDefaultAsync();
-
-        if (user == null) return Unauthorized();
-        if (user.Plan == "pro" || user.Role == "admin") return null;
-
-        var rows = await _context.Users
-            .Where(u => u.Id == userId && u.Credits >= amount)
-            .ExecuteUpdateAsync(s => s.SetProperty(u => u.Credits, u => u.Credits - amount));
-
-        if (rows == 0)
-            return StatusCode(402, new
-            {
-                message = $"Créditos insuficientes. Necesitas {amount}, tienes {user.Credits}.",
-                credits = user.Credits,
-                plan = user.Plan,
-            });
-
-        HttpContext.Response.Headers.Append("X-Credits-Remaining", (user.Credits - amount).ToString());
-        return null;
-    }
+    private async Task<IActionResult?> ConsumeCredits(int amount = 5) =>
+        this.CreditErrorOrNull(await _credits.TryConsumeAsync(this.CurrentUserId(), amount));
 
     // GET /api/analytics/locations
     [HttpGet("locations")]

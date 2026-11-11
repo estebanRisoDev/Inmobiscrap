@@ -18,7 +18,7 @@ public class PropertyHistoryController : ControllerBase
     /// GET /api/properties/{id}/timeline
     /// Línea de tiempo completa: todos los snapshots de una propiedad.
     /// </summary>
-    [HttpGet("{id}/timeline")]
+    [HttpGet("{id:int}/timeline")]
     public async Task<IActionResult> GetTimeline(int id)
     {
         var property = await _context.Properties
@@ -87,6 +87,8 @@ public class PropertyHistoryController : ControllerBase
         [FromQuery] int days  = 30,
         [FromQuery] int limit = 50)
     {
+        days  = Math.Clamp(days, 1, 365);
+        limit = Math.Clamp(limit, 1, 100);
         var since = DateTime.UtcNow.AddDays(-days);
 
         var changes = await _context.Properties
@@ -106,7 +108,7 @@ public class PropertyHistoryController : ControllerBase
                 previousPrice = p.PreviousPrice,
                 priceChange   = p.Price - p.PreviousPrice,
                 changePercent = p.PreviousPrice > 0
-                    ? Math.Round((double)((p.Price - p.PreviousPrice) / p.PreviousPrice * 100), 1)
+                    ? Math.Round((double)((p.Price!.Value - p.PreviousPrice!.Value) / p.PreviousPrice.Value * 100), 1)
                     : 0,
                 p.PriceChangedAt,
                 p.SourceUrl,
@@ -390,6 +392,8 @@ public class PropertyHistoryController : ControllerBase
         [FromQuery] int days  = 7,
         [FromQuery] int limit = 50)
     {
+        days  = Math.Clamp(days, 1, 365);
+        limit = Math.Clamp(limit, 1, 100);
         var cutoff = DateTime.UtcNow.AddDays(-days);
 
         var delisted = await _context.Properties

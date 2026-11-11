@@ -2,12 +2,14 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using BCrypt.Net;
 using Inmobiscrap.Data;
+using Inmobiscrap.Infrastructure;
 using Inmobiscrap.Models;
 
 namespace Inmobiscrap.Controllers;
@@ -45,11 +47,14 @@ public class AuthController : ControllerBase
 
     /// <summary>
     /// Determina si un email debe recibir rol admin automáticamente.
-    /// Configurado via SUPERADMIN_EMAIL en .env (puede ser CSV: "a@b.com,c@d.com")
+    /// Configurado via SUPERADMIN_EMAIL en .env (puede ser CSV: "a@b.com,c@d.com").
+    /// SOLO se aplica en el login con Google (email verificado por Google): el
+    /// registro con contraseña no verifica el email, así que cualquiera podría
+    /// registrarse con el email del admin y quedar como admin.
     /// </summary>
-    private bool IsSuperAdminEmail(string email)
+    private static bool IsSuperAdminEmail(string email)
     {
-        var superAdminEmails = Environment.GetEnvironmentVariable("SUPERADMIN_EMAIL") ?? "";
+        var superAdminEmails = EnvConfig.Get("SUPERADMIN_EMAIL") ?? "";
         return superAdminEmails
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Any(e => e.Equals(email, StringComparison.OrdinalIgnoreCase));
@@ -65,30 +70,40 @@ public class AuthController : ControllerBase
         if (req.Password.Length < 8)
             return BadRequest(new { message = "La contraseña debe tener al menos 8 caracteres." });
 
+        if (req.Password.Length > 72)
+            return BadRequest(new { message = "La contraseña no puede superar 72 caracteres." });
+
         var emailLower = req.Email.ToLower().Trim();
+
+        if (!System.Net.Mail.MailAddress.TryCreate(emailLower, out _) || emailLower.Length > 320)
+            return BadRequest(new { message = "Email inválido." });
 
         if (await _context.Users.AnyAsync(u => u.Email == emailLower))
             return Conflict(new { message = "Ya existe una cuenta con ese email." });
 
-        var isAdmin = IsSuperAdminEmail(emailLower);
-
+        // Nunca admin por registro con contraseña (email no verificado).
         var user = new User
         {
-            Name         = req.Name.Trim(),
+            Name         = req.Name.Trim().Length > 200 ? req.Name.Trim()[..200] : req.Name.Trim(),
             Email        = emailLower,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(req.Password),
-            Plan         = isAdmin ? "pro" : "base",
-            Credits      = isAdmin ? 0 : 50,
-            Role         = isAdmin ? "admin" : "user",
+            Plan         = "base",
+            Credits      = 50,
+            Role         = "user",
             CreatedAt    = DateTime.UtcNow,
             LastLogin    = DateTime.UtcNow,
         };
 
         _context.Users.Add(user);
-        await _context.SaveChangesAsync();
-
-        if (isAdmin)
-            _logger.LogInformation("🔑 SuperAdmin registered: {Email}", emailLower);
+        try
+        {
+            await _context.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // Registro concurrente con el mismo email (índice único)
+            return Conflict(new { message = "Ya existe una cuenta con ese email." });
+        }
 
         return Ok(new AuthResponse(GenerateJwt(user), ToDto(user)));
     }
@@ -112,14 +127,7 @@ public class AuthController : ControllerBase
         if (!user.IsActive)
             return Unauthorized(new { message = "Tu cuenta está desactivada." });
 
-        // Auto-promover si el email está en SUPERADMIN_EMAIL y aún no es admin
-        if (IsSuperAdminEmail(emailLower) && user.Role != "admin")
-        {
-            user.Role = "admin";
-            user.Plan = "pro";
-            _logger.LogInformation("🔑 Existing user promoted to admin: {Email}", emailLower);
-        }
-
+        // La promoción a admin vía SUPERADMIN_EMAIL solo ocurre en el login con Google.
         user.LastLogin = DateTime.UtcNow;
         await _context.SaveChangesAsync();
 
@@ -133,6 +141,15 @@ public class AuthController : ControllerBase
         if (string.IsNullOrWhiteSpace(req.IdToken))
             return BadRequest(new { message = "Token de Google no proporcionado." });
 
+        // Fail-closed: sin client id no se puede validar la audiencia del token
+        // (se aceptarían tokens emitidos para cualquier otra app).
+        var expectedClientId = EnvConfig.Get("GOOGLE_CLIENT_ID") ?? _configuration["Google:ClientId"];
+        if (string.IsNullOrEmpty(expectedClientId))
+        {
+            _logger.LogError("GOOGLE_CLIENT_ID no configurado: login con Google deshabilitado.");
+            return StatusCode(503, new { message = "Login con Google no está configurado." });
+        }
+
         GoogleTokenInfo? tokenInfo;
         try
         {
@@ -144,20 +161,38 @@ public class AuthController : ControllerBase
             return Unauthorized(new { message = "Token de Google inválido o expirado." });
         }
 
-        if (tokenInfo == null)
+        if (tokenInfo == null || string.IsNullOrWhiteSpace(tokenInfo.Sub))
             return Unauthorized(new { message = "No se pudo verificar el token de Google." });
 
-        var expectedClientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID")
-            ?? _configuration["Google:ClientId"];
-
-        if (!string.IsNullOrEmpty(expectedClientId) && tokenInfo.Aud != expectedClientId)
+        if (tokenInfo.Aud != expectedClientId)
             return Unauthorized(new { message = "Token de Google no pertenece a esta aplicación." });
 
-        var emailLower = tokenInfo.Email?.ToLower().Trim() ?? "";
+        if (string.IsNullOrWhiteSpace(tokenInfo.Email) || !tokenInfo.IsEmailVerified)
+            return Unauthorized(new { message = "El email de tu cuenta de Google no está verificado." });
+
+        var emailLower = tokenInfo.Email.ToLower().Trim();
         var isAdmin = IsSuperAdminEmail(emailLower);
 
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.GoogleId == tokenInfo.Sub)
-                ?? await _context.Users.FirstOrDefaultAsync(u => u.Email == emailLower);
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.GoogleId == tokenInfo.Sub);
+
+        if (user == null)
+        {
+            var byEmail = await _context.Users.FirstOrDefaultAsync(u => u.Email == emailLower);
+
+            // Cuenta creada con contraseña (email nunca verificado) y sin Google vinculado:
+            // no se vincula automáticamente, porque quien la registró pudo ser otra
+            // persona usando este email (pre-account takeover).
+            if (byEmail != null && byEmail.GoogleId == null && !string.IsNullOrEmpty(byEmail.PasswordHash))
+            {
+                _logger.LogWarning("Google login rechazado: {Email} ya existe con contraseña y sin Google vinculado.", emailLower);
+                return Conflict(new { message = "Ya existe una cuenta con este email. Inicia sesión con tu contraseña." });
+            }
+
+            user = byEmail;
+        }
+
+        if (user != null && !user.IsActive)
+            return Unauthorized(new { message = "Tu cuenta está desactivada." });
 
         if (user == null)
         {
@@ -182,11 +217,12 @@ public class AuthController : ControllerBase
             user.AvatarUrl ??= tokenInfo.Picture;
             user.LastLogin   = DateTime.UtcNow;
 
-            // Auto-promover si está en SUPERADMIN_EMAIL
+            // Auto-promover si está en SUPERADMIN_EMAIL (email verificado por Google)
             if (isAdmin && user.Role != "admin")
             {
                 user.Role = "admin";
                 user.Plan = "pro";
+                _logger.LogInformation("🔑 User promoted to admin via Google: {Email}", emailLower);
             }
         }
 
@@ -232,7 +268,7 @@ public class AuthController : ControllerBase
 
     private string GenerateJwt(User user)
     {
-        var jwtKey = Environment.GetEnvironmentVariable("JWT_SECRET")
+        var jwtKey = EnvConfig.Get("JWT_SECRET")
             ?? _configuration["Jwt:Secret"]
             ?? throw new InvalidOperationException("JWT_SECRET not configured.");
 
@@ -263,7 +299,7 @@ public class AuthController : ControllerBase
     {
         var client = _httpClientFactory.CreateClient();
         var response = await client.GetAsync(
-            $"https://oauth2.googleapis.com/tokeninfo?id_token={idToken}");
+            $"https://oauth2.googleapis.com/tokeninfo?id_token={Uri.EscapeDataString(idToken)}");
 
         if (!response.IsSuccessStatusCode)
             throw new Exception("Google rejected the token.");
@@ -289,5 +325,14 @@ public class AuthController : ControllerBase
         public string? Name    { get; set; }
         public string? Picture { get; set; }
         public string? Aud     { get; set; }
+
+        // tokeninfo devuelve "true"/"false" como string (a veces como bool)
+        [JsonPropertyName("email_verified")]
+        public JsonElement EmailVerified { get; set; }
+
+        public bool IsEmailVerified =>
+            EmailVerified.ValueKind == JsonValueKind.True
+            || (EmailVerified.ValueKind == JsonValueKind.String
+                && string.Equals(EmailVerified.GetString(), "true", StringComparison.OrdinalIgnoreCase));
     }
 }

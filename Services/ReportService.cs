@@ -1693,21 +1693,49 @@ public class ReportService : IReportService
     }
 
     // ── Escape caracteres especiales de LaTeX ─────────────────────────────────
+    // Una sola pasada: con Replace encadenados, las llaves de "\textbackslash{}"
+    // se volvían a escapar ("\textbackslash\{\}").
+    // También descarta caracteres que pdflatex (inputenc utf8 + T1) no soporta,
+    // como emojis en títulos scrapeados, que hacían fallar toda la compilación.
     private static string Esc(string? s)
     {
         if (string.IsNullOrEmpty(s)) return "---";
-        return s
-            .Replace(@"\", @"\textbackslash{}")
-            .Replace("&",  @"\&")
-            .Replace("%",  @"\%")
-            .Replace("$",  @"\$")
-            .Replace("#",  @"\#")
-            .Replace("_",  @"\_")
-            .Replace("{",  @"\{")
-            .Replace("}",  @"\}")
-            .Replace("~",  @"\textasciitilde{}")
-            .Replace("^",  @"\textasciicircum{}")
-            .Replace("…",  @"\ldots{}");
+
+        var sb = new StringBuilder(s.Length + 16);
+        foreach (var ch in s)
+        {
+            switch (ch)
+            {
+                case '\\': sb.Append(@"\textbackslash{}");   break;
+                case '&':  sb.Append(@"\&");                 break;
+                case '%':  sb.Append(@"\%");                 break;
+                case '$':  sb.Append(@"\$");                 break;
+                case '#':  sb.Append(@"\#");                 break;
+                case '_':  sb.Append(@"\_");                 break;
+                case '{':  sb.Append(@"\{");                 break;
+                case '}':  sb.Append(@"\}");                 break;
+                case '~':  sb.Append(@"\textasciitilde{}");  break;
+                case '^':  sb.Append(@"\textasciicircum{}"); break;
+                case '…':  sb.Append(@"\ldots{}");           break;
+                case '<':  sb.Append(@"\textless{}");        break;
+                case '>':  sb.Append(@"\textgreater{}");     break;
+                case '|':  sb.Append(@"\textbar{}");         break;
+                case '–':  sb.Append("--");                  break;
+                case '—':  sb.Append("---");                 break;
+                case '“': case '”': sb.Append('"');          break;
+                case '‘': case '’': sb.Append('\'');         break;
+                case '•':  sb.Append(@"\textbullet{}");      break;
+                case '€':  sb.Append("EUR");                 break;
+                case '²':  sb.Append(@"\textsuperscript{2}"); break;
+                case '\r': case '\n': case '\t': sb.Append(' '); break;
+                default:
+                    // Latin-1 imprimible (incluye á é í ó ú ñ ü ¿ ¡ º ª) es soportado por T1
+                    if ((ch >= ' ' && ch <= '~') || (ch >= ' ' && ch <= 'ÿ'))
+                        sb.Append(ch);
+                    break; // resto (emojis, surrogates, CJK…) se descarta
+            }
+        }
+        return sb.Length == 0 ? "---" : sb.ToString();
     }
 
     private static string FormatPrice(double? value, string? currency)

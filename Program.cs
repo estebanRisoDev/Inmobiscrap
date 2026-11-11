@@ -1,9 +1,11 @@
+using System.Security.Claims;
 using System.Text;
 using Inmobiscrap.Data;
 using Inmobiscrap.Services;
 using Inmobiscrap.Jobs;
 using Inmobiscrap.Hubs;
 using Inmobiscrap.Filters;
+using Inmobiscrap.Infrastructure;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
@@ -14,7 +16,9 @@ using Amazon.BedrockRuntime;
 using Amazon.Runtime;
 using DotNetEnv;
 
-Env.Load();
+// NoClobber: las variables ya definidas (docker-compose `environment:`) ganan
+// sobre el .env, en vez de que el .env montado en /app las pise.
+Env.NoClobber().Load();
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -33,8 +37,8 @@ builder.Services.AddCors(options =>
         };
 
         // Include FRONTEND_URL so MP redirect origin is allowed
-        var frontendUrl = Environment.GetEnvironmentVariable("FRONTEND_URL");
-        if (!string.IsNullOrEmpty(frontendUrl))
+        var frontendUrl = EnvConfig.Get("FRONTEND_URL");
+        if (frontendUrl != null)
             origins.Add(frontendUrl.TrimEnd('/'));
 
         policy.WithOrigins(origins.ToArray())
@@ -45,16 +49,24 @@ builder.Services.AddCors(options =>
 });
 
 // ── DATABASE ─────────────────────────────────────────────────────────────────
-var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING")
+var connectionString = EnvConfig.Get("DB_CONNECTION_STRING")
     ?? builder.Configuration.GetConnectionString("DefaultConnection");
+
+if (string.IsNullOrWhiteSpace(connectionString))
+    throw new InvalidOperationException(
+        "Falta la conexión a la BD: define DB_CONNECTION_STRING o ConnectionStrings__DefaultConnection.");
 
 builder.Services.AddDbContext<ApplicationDbContext>(options =>
     options.UseNpgsql(connectionString));
 
 // ── JWT AUTHENTICATION ────────────────────────────────────────────────────────
-var jwtSecret = Environment.GetEnvironmentVariable("JWT_SECRET")
+var jwtSecret = EnvConfig.Get("JWT_SECRET")
     ?? builder.Configuration["Jwt:Secret"]
     ?? throw new InvalidOperationException("JWT_SECRET must be set in environment variables.");
+
+// HS256 exige una clave de al menos 256 bits; si no, falla recién al firmar el primer token.
+if (Encoding.UTF8.GetByteCount(jwtSecret) < 32)
+    throw new InvalidOperationException("JWT_SECRET debe tener al menos 32 caracteres.");
 
 builder.Services.AddAuthentication(options =>
 {
@@ -85,7 +97,41 @@ builder.Services.AddAuthentication(options =>
             if (!string.IsNullOrEmpty(accessToken) && path.StartsWithSegments("/hubs"))
                 context.Token = accessToken;
             return Task.CompletedTask;
-        }
+        },
+
+        // El JWT dura 7 días: re-leer rol/plan/estado desde la BD en cada request
+        // para que downgrades, cambios de rol y desactivaciones apliquen de inmediato.
+        OnTokenValidated = async context =>
+        {
+            var identity = context.Principal?.Identity as ClaimsIdentity;
+            var idClaim  = identity?.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            if (identity == null || !int.TryParse(idClaim, out var userId))
+            {
+                context.Fail("Token sin usuario válido.");
+                return;
+            }
+
+            var db = context.HttpContext.RequestServices.GetRequiredService<ApplicationDbContext>();
+            var current = await db.Users
+                .AsNoTracking()
+                .Where(u => u.Id == userId)
+                .Select(u => new { u.IsActive, u.Role, u.Plan })
+                .FirstOrDefaultAsync();
+
+            if (current == null || !current.IsActive)
+            {
+                context.Fail("Usuario inexistente o desactivado.");
+                return;
+            }
+
+            foreach (var claim in identity.FindAll(identity.RoleClaimType).ToList())
+                identity.RemoveClaim(claim);
+            foreach (var claim in identity.FindAll("plan").ToList())
+                identity.RemoveClaim(claim);
+
+            identity.AddClaim(new Claim(identity.RoleClaimType, current.Role));
+            identity.AddClaim(new Claim("plan", current.Plan));
+        },
     };
 });
 
@@ -98,14 +144,29 @@ builder.Services.AddAuthorization(options =>
 });
 
 // ── AWS BEDROCK ───────────────────────────────────────────────────────────────
-var awsAccessKey = Environment.GetEnvironmentVariable("AWS_ACCESS_KEY_ID");
-var awsSecretKey = Environment.GetEnvironmentVariable("AWS_SECRET_ACCESS_KEY");
-var awsRegion    = Environment.GetEnvironmentVariable("AWS_REGION") ?? "sa-east-1";
+var awsAccessKey = EnvConfig.Get("AWS_ACCESS_KEY_ID");
+var awsSecretKey = EnvConfig.Get("AWS_SECRET_ACCESS_KEY");
+// El modelo por defecto es un perfil "us." → requiere una región de EE.UU.
+var awsRegion    = EnvConfig.Get("AWS_REGION") ?? "us-east-1";
+var mockScraping = EnvConfig.GetBool("SCRAPER_MOCK_MODE");
 
-if (string.IsNullOrEmpty(awsAccessKey) || string.IsNullOrEmpty(awsSecretKey))
-    throw new InvalidOperationException("AWS credentials not found.");
+AWSCredentials credentials;
+if (awsAccessKey != null && awsSecretKey != null)
+{
+    credentials = new BasicAWSCredentials(awsAccessKey, awsSecretKey);
+}
+else if (mockScraping)
+{
+    // En modo mock Bedrock nunca se llama: se permite arrancar sin credenciales.
+    Console.WriteLine("⚠️  SCRAPER_MOCK_MODE=true y sin credenciales AWS: Bedrock deshabilitado.");
+    credentials = new AnonymousAWSCredentials();
+}
+else
+{
+    throw new InvalidOperationException(
+        "AWS credentials not found (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY). Usa SCRAPER_MOCK_MODE=true para probar sin AWS.");
+}
 
-var credentials = new BasicAWSCredentials(awsAccessKey, awsSecretKey);
 builder.Services.AddSingleton<IAmazonBedrockRuntime>(
     new AmazonBedrockRuntimeClient(credentials, Amazon.RegionEndpoint.GetBySystemName(awsRegion)));
 
@@ -133,6 +194,7 @@ builder.Services.AddScoped<PropertyVerificationJob>();
 builder.Services.AddSingleton<IVerificationJobStatus, VerificationJobStatus>();
 builder.Services.AddScoped<IEmailService, EmailService>();
 builder.Services.AddScoped<PriceAlertJob>();
+builder.Services.AddScoped<ICreditService, CreditService>();
 
 builder.Services.AddScoped<DevelopmentOnlyFilter>();
 builder.Services.AddControllers();
@@ -237,7 +299,7 @@ using (var scope = app.Services.CreateScope())
     try
     {
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-        var superAdminEmails = Environment.GetEnvironmentVariable("SUPERADMIN_EMAIL") ?? "";
+        var superAdminEmails = EnvConfig.Get("SUPERADMIN_EMAIL") ?? "";
 
         var emails = superAdminEmails
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -246,8 +308,10 @@ using (var scope = app.Services.CreateScope())
 
         if (emails.Any())
         {
+            // Solo cuentas cuyo email fue verificado por Google (GoogleId != null).
+            // Una cuenta con contraseña pudo registrarla cualquiera con ese email.
             var usersToPromote = await db.Users
-                .Where(u => emails.Contains(u.Email) && u.Role != "admin")
+                .Where(u => emails.Contains(u.Email) && u.Role != "admin" && u.GoogleId != null)
                 .ToListAsync();
 
             foreach (var user in usersToPromote)
@@ -282,26 +346,40 @@ using (var scope = app.Services.CreateScope())
         int registered = 0;
         int removed    = 0;
 
+        int failed     = 0;
+
         foreach (var bot in allBots)
         {
             var jobId = $"bot-schedule-{bot.Id}";
 
-            if (bot.IsActive && bot.ScheduleEnabled && !string.IsNullOrWhiteSpace(bot.CronExpression))
+            // try por bot: un cron inválido no debe impedir registrar los demás
+            try
             {
-                recurringJobs.AddOrUpdate<ScrapingJob>(
-                    jobId,
-                    job => job.ExecuteBotAsync(bot.Id),
-                    bot.CronExpression);
-                registered++;
+                if (bot.IsActive && bot.ScheduleEnabled && CronValidator.IsValid(bot.CronExpression, out _))
+                {
+                    var botId = bot.Id;
+                    recurringJobs.AddOrUpdate<ScrapingJob>(
+                        jobId,
+                        job => job.ExecuteBotAsync(botId),
+                        bot.CronExpression!.Trim());
+                    registered++;
+                }
+                else
+                {
+                    if (bot.IsActive && bot.ScheduleEnabled)
+                        Console.WriteLine($"⚠️  Bot {bot.Id}: CronExpression inválida '{bot.CronExpression}', no se programa.");
+                    recurringJobs.RemoveIfExists(jobId);
+                    removed++;
+                }
             }
-            else
+            catch (Exception ex)
             {
-                recurringJobs.RemoveIfExists(jobId);
-                removed++;
+                failed++;
+                Console.WriteLine($"Hangfire sync error en bot {bot.Id}: {ex.Message}");
             }
         }
 
-        Console.WriteLine($"✅ Hangfire sync: {registered} job(s) registrado(s), {removed} eliminado(s).");
+        Console.WriteLine($"✅ Hangfire sync: {registered} job(s) registrado(s), {removed} eliminado(s), {failed} con error.");
     }
     catch (Exception ex)
     {
@@ -361,7 +439,7 @@ using (var scope = app.Services.CreateScope())
         Cron.Daily(8, 0)); // Enviar alertas de precio diariamente a las 8:00 AM
 }
 
-var port = Environment.GetEnvironmentVariable("API_PORT") ?? "5000";
+var port = EnvConfig.Get("API_PORT") ?? "5000";
 Console.WriteLine($"🚀 API corriendo en http://localhost:{port}");
 Console.WriteLine($"📊 Swagger UI: http://localhost:{port}/swagger");
 Console.WriteLine($"🔐 Auth endpoints: /api/auth/register | /api/auth/login | /api/auth/google");

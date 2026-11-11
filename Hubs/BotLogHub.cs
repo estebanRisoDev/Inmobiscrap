@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 using Inmobiscrap.Services;
 
@@ -6,7 +7,10 @@ namespace Inmobiscrap.Hubs;
 /// <summary>
 /// Hub de SignalR para transmitir logs de bots en tiempo real.
 /// Al suscribirse, envía el historial en buffer antes de conectar al stream en vivo.
+/// Solo admin: los bots y sus logs son una funcionalidad de administración.
+/// El token se envía por query string (?access_token=) — ver OnMessageReceived en Program.cs.
 /// </summary>
+[Authorize(Roles = "admin")]
 public class BotLogHub : Hub
 {
     private readonly ILogger<BotLogHub> _logger;

@@ -1,7 +1,8 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Inmobiscrap.Data;
+using Inmobiscrap.Infrastructure;
+using Inmobiscrap.Services;
 using Microsoft.AspNetCore.Authorization;
 
 namespace Inmobiscrap.Controllers;
@@ -12,41 +13,16 @@ namespace Inmobiscrap.Controllers;
 public class PropertyMetricsController : ControllerBase
 {
     private readonly ApplicationDbContext _context;
+    private readonly ICreditService _credits;
 
-    public PropertyMetricsController(ApplicationDbContext context) => _context = context;
-
-    private int GetUserId()
+    public PropertyMetricsController(ApplicationDbContext context, ICreditService credits)
     {
-        var claim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-        return int.TryParse(claim, out var id) ? id : 0;
+        _context = context;
+        _credits = credits;
     }
 
-    private async Task<IActionResult?> ConsumeCredits(int amount = 5)
-    {
-        var userId = GetUserId();
-
-        // Lectura liviana solo para verificar plan/rol y tener el conteo actual para el mensaje de error
-        var user = await _context.Users
-            .AsNoTracking()
-            .Where(u => u.Id == userId)
-            .Select(u => new { u.Plan, u.Role, u.Credits })
-            .FirstOrDefaultAsync();
-
-        if (user == null) return Unauthorized();
-        if (user.Plan == "pro" || user.Role == "admin") return null;
-
-        // Decremento atómico: solo ejecuta si Credits >= amount en la misma operación SQL
-        // Elimina la race condition del patrón read-then-write anterior
-        var rows = await _context.Users
-            .Where(u => u.Id == userId && u.Credits >= amount)
-            .ExecuteUpdateAsync(s => s.SetProperty(u => u.Credits, u => u.Credits - amount));
-
-        if (rows == 0)
-            return StatusCode(402, new { message = $"Créditos insuficientes. Necesitas {amount}, tienes {user.Credits}.", credits = user.Credits, plan = user.Plan });
-
-        HttpContext.Response.Headers.Append("X-Credits-Remaining", (user.Credits - amount).ToString());
-        return null;
-    }
+    private async Task<IActionResult?> ConsumeCredits(int amount = 5) =>
+        this.CreditErrorOrNull(await _credits.TryConsumeAsync(this.CurrentUserId(), amount));
 
     // GET /api/metrics/general
     [HttpGet("general")]
@@ -233,6 +209,15 @@ public class PropertyMetricsController : ControllerBase
         [FromQuery] string?  sortBy = "price", [FromQuery] string? sortDir = "asc",
         [FromQuery] int page = 1, [FromQuery] int pageSize = 50)
     {
+        page     = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        // Npgsql exige Kind=Utc para comparar contra timestamptz
+        pubDateFrom   = pubDateFrom.ToUtc();
+        pubDateTo     = pubDateTo.ToUtc();
+        firstSeenFrom = firstSeenFrom.ToUtc();
+        firstSeenTo   = firstSeenTo.ToUtc();
+
         var check = await ConsumeCredits();
         if (check != null) return check;
 
@@ -299,7 +284,7 @@ public class PropertyMetricsController : ControllerBase
 
         var properties = await query
             .Skip((page - 1) * pageSize)
-            .Take(Math.Min(pageSize, 100))
+            .Take(pageSize)
             .Select(p => new
             {
                 p.Id,

@@ -39,6 +39,9 @@ public class SoldController : ControllerBase
         [FromQuery] string? sortBy = "soldDate",
         [FromQuery] string? sortDir = "desc")
     {
+        page     = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
         var query = _context.Properties
             .Where(p => p.ListingStatus == "sold");
 
@@ -218,8 +221,10 @@ public class SoldController : ControllerBase
         if (last == null)
             return Ok(new { hasRun = false });
 
-        // Próxima ejecución: 3:00 AM UTC del día siguiente a la última ejecución
-        var nextRun = last.RanAt.Date.AddDays(1).AddHours(3);
+        // El job corre a las 03:00 y 15:00 UTC (ver Program.cs)
+        var nowUtc  = DateTime.UtcNow;
+        var nextRun = new[] { nowUtc.Date.AddHours(3), nowUtc.Date.AddHours(15), nowUtc.Date.AddDays(1).AddHours(3) }
+            .First(t => t > nowUtc);
 
         return Ok(new
         {
@@ -241,6 +246,7 @@ public class SoldController : ControllerBase
     public async Task<IActionResult> GetVerificationQueue(
         [FromQuery] int limit = 50)
     {
+        limit = Math.Clamp(limit, 1, 200);
         var threeDaysAgo = DateTime.UtcNow.AddDays(-3);
 
         var queue = await _context.Properties
@@ -277,13 +283,18 @@ public class SoldController : ControllerBase
     /// POST /api/properties/sold/{id}/verify
     /// Fuerza verificación HTTP de una propiedad.
     /// </summary>
-    [HttpPost("{id}/verify")]
+    [HttpPost("{id:int}/verify")]
     public async Task<IActionResult> VerifyProperty(int id)
     {
         var property = await _context.Properties.FindAsync(id);
         if (property == null) return NotFound();
         if (string.IsNullOrWhiteSpace(property.SourceUrl))
             return BadRequest(new { error = "Propiedad sin SourceUrl, no se puede verificar." });
+
+        // Evita que usuarios Pro disparen requests en loop contra el portal
+        if (property.LastVerifiedAt.HasValue && property.LastVerifiedAt > DateTime.UtcNow.AddMinutes(-5)
+            && !User.IsInRole("admin"))
+            return StatusCode(429, new { error = "Esta propiedad se verificó hace menos de 5 minutos." });
 
         var result = await _verificationService.VerifySinglePropertyAsync(id);
 
@@ -304,7 +315,8 @@ public class SoldController : ControllerBase
     /// POST /api/properties/sold/{id}/mark-sold
     /// Marca manualmente como vendida.
     /// </summary>
-    [HttpPost("{id}/mark-sold")]
+    [HttpPost("{id:int}/mark-sold")]
+    [Authorize(Roles = "admin")] // modifica datos globales: no cualquier usuario Pro
     public async Task<IActionResult> MarkSold(int id)
     {
         var property = await _context.Properties.FindAsync(id);
@@ -318,7 +330,8 @@ public class SoldController : ControllerBase
     /// POST /api/properties/sold/{id}/mark-active
     /// Reactivar (falso positivo).
     /// </summary>
-    [HttpPost("{id}/mark-active")]
+    [HttpPost("{id:int}/mark-active")]
+    [Authorize(Roles = "admin")]
     public async Task<IActionResult> MarkActive(int id)
     {
         var property = await _context.Properties.FindAsync(id);

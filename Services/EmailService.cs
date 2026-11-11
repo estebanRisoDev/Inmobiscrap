@@ -1,11 +1,13 @@
 using System.Net;
 using System.Net.Mail;
+using Inmobiscrap.Infrastructure;
 
 namespace Inmobiscrap.Services;
 
 public interface IEmailService
 {
-    Task SendAsync(string toEmail, string toName, string subject, string htmlBody);
+    /// <returns>true si el email se envió; false si SMTP no está configurado o falló.</returns>
+    Task<bool> SendAsync(string toEmail, string toName, string subject, string htmlBody);
 }
 
 public class EmailService : IEmailService
@@ -21,19 +23,19 @@ public class EmailService : IEmailService
     public EmailService(ILogger<EmailService> logger)
     {
         _logger = logger;
-        _host   = Environment.GetEnvironmentVariable("SMTP_HOST") ?? "";
-        _port   = int.TryParse(Environment.GetEnvironmentVariable("SMTP_PORT"), out var p) ? p : 587;
-        _user   = Environment.GetEnvironmentVariable("SMTP_USER") ?? "";
-        _pass   = Environment.GetEnvironmentVariable("SMTP_PASS") ?? "";
-        _from   = Environment.GetEnvironmentVariable("SMTP_FROM") ?? "notificaciones@inmobiscrap.com";
+        _host   = EnvConfig.Get("SMTP_HOST") ?? "";
+        _port   = int.TryParse(EnvConfig.Get("SMTP_PORT"), out var p) ? p : 587;
+        _user   = EnvConfig.Get("SMTP_USER") ?? "";
+        _pass   = EnvConfig.Get("SMTP_PASS") ?? "";
+        _from   = EnvConfig.Get("SMTP_FROM") ?? "notificaciones@inmobiscrap.com";
     }
 
-    public async Task SendAsync(string toEmail, string toName, string subject, string htmlBody)
+    public async Task<bool> SendAsync(string toEmail, string toName, string subject, string htmlBody)
     {
         if (string.IsNullOrWhiteSpace(_host) || string.IsNullOrWhiteSpace(_user))
         {
             _logger.LogWarning("EmailService: SMTP_HOST o SMTP_USER no configurados. Email a {Email} no enviado.", toEmail);
-            return;
+            return false;
         }
 
         using var client = new SmtpClient(_host, _port)
@@ -56,10 +58,12 @@ public class EmailService : IEmailService
         {
             await client.SendMailAsync(message);
             _logger.LogInformation("Email enviado a {Email}: {Subject}", toEmail, subject);
+            return true;
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error enviando email a {Email}", toEmail);
+            return false;
         }
     }
 }

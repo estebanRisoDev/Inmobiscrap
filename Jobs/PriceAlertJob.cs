@@ -1,5 +1,7 @@
+using System.Net;
 using Microsoft.EntityFrameworkCore;
 using Inmobiscrap.Data;
+using Inmobiscrap.Infrastructure;
 using Inmobiscrap.Services;
 
 namespace Inmobiscrap.Jobs;
@@ -81,10 +83,12 @@ public class PriceAlertJob
             var subject = $"📉 Bajó el precio: {p.Title}";
             var html    = BuildEmailHtml(alert.User.Name, p.Title, p.City, formattedPrev, formatted, dropPct, p.SourceUrl);
 
-            await _email.SendAsync(alert.User.Email, alert.User.Name, subject, html);
-
-            alert.LastNotifiedAt = DateTime.UtcNow;
-            sent++;
+            // Solo marcar como notificada si el email salió; si no, se reintenta mañana.
+            if (await _email.SendAsync(alert.User.Email, alert.User.Name, subject, html))
+            {
+                alert.LastNotifiedAt = DateTime.UtcNow;
+                sent++;
+            }
         }
 
         await _context.SaveChangesAsync();
@@ -95,6 +99,12 @@ public class PriceAlertJob
         string userName, string? title, string? city,
         string prevPrice, string newPrice, double dropPct, string? url)
     {
+        // Título, ciudad y URL vienen de páginas scrapeadas: escapar para no inyectar HTML
+        userName = WebUtility.HtmlEncode(userName);
+        title    = title != null ? WebUtility.HtmlEncode(title) : null;
+        city     = city  != null ? WebUtility.HtmlEncode(city)  : null;
+        url      = SafeHttp.IsHttpUrl(url) ? WebUtility.HtmlEncode(url) : null;
+
         var linkHtml = !string.IsNullOrWhiteSpace(url)
             ? $"<a href=\"{url}\" style=\"display:inline-block;margin-top:20px;padding:12px 24px;background:#2a9d8f;color:#fff;border-radius:8px;text-decoration:none;font-weight:700;\">Ver propiedad →</a>"
             : "";

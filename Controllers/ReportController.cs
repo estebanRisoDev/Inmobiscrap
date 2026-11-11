@@ -10,12 +10,18 @@ namespace Inmobiscrap.Controllers;
 [Authorize]
 public class ReportController : ControllerBase
 {
+    // Mismo costo que las vistas equivalentes del dashboard
+    private const int MarketReportCost       = 5;
+    private const int ComparisonCostPerItem  = 5;
+
     private readonly IReportService _reportService;
+    private readonly ICreditService _credits;
     private readonly ILogger<ReportController> _logger;
 
-    public ReportController(IReportService reportService, ILogger<ReportController> logger)
+    public ReportController(IReportService reportService, ICreditService credits, ILogger<ReportController> logger)
     {
         _reportService = reportService;
+        _credits       = credits;
         _logger        = logger;
     }
 
@@ -36,29 +42,12 @@ public class ReportController : ControllerBase
             User.FindFirst(ClaimTypes.Email)?.Value ?? "unknown",
             region, city, neighborhood, propertyType);
 
-        try
-        {
-            var filters = new ReportFilters(region, city, neighborhood, propertyType);
-            var pdfBytes = await _reportService.GenerateMarketReportAsync(filters);
-
-            var fileName = BuildFileName(filters);
-
-            return File(
-                pdfBytes,
-                "application/pdf",
-                fileName
-            );
-        }
-        catch (InvalidOperationException ex)
-        {
-            _logger.LogError(ex, "Report generation failed");
-            return StatusCode(500, new { message = ex.Message });
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Unexpected error generating report");
-            return StatusCode(500, new { message = "Error inesperado al generar el informe." });
-        }
+        var filters = new ReportFilters(region, city, neighborhood, propertyType);
+        return await GenerateWithCreditsAsync(
+            MarketReportCost,
+            () => _reportService.GenerateMarketReportAsync(filters),
+            BuildFileName(filters),
+            "Error inesperado al generar el informe.");
     }
 
     /// <summary>
@@ -74,6 +63,7 @@ public class ReportController : ControllerBase
         var idList = ids.Split(',')
             .Select(s => int.TryParse(s.Trim(), out var id) ? id : 0)
             .Where(id => id > 0)
+            .Distinct()
             .Take(20)
             .ToList();
 
@@ -82,25 +72,51 @@ public class ReportController : ControllerBase
 
         _logger.LogInformation(
             "User {User} requested comparison report — ids={Ids}",
-            User.FindFirst(System.Security.Claims.ClaimTypes.Email)?.Value ?? "unknown",
+            User.FindFirst(ClaimTypes.Email)?.Value ?? "unknown",
             string.Join(",", idList));
+
+        return await GenerateWithCreditsAsync(
+            idList.Count * ComparisonCostPerItem,
+            () => _reportService.GenerateComparisonReportAsync(idList),
+            $"comparativa-{idList.Count}-propiedades-{DateTime.Now:yyyyMMdd}.pdf",
+            "Error inesperado al generar el informe comparativo.");
+    }
+
+    /// <summary>
+    /// Cobra créditos, genera el PDF y reembolsa si la generación falla.
+    /// </summary>
+    private async Task<IActionResult> GenerateWithCreditsAsync(
+        int cost, Func<Task<byte[]>> generate, string fileName, string unexpectedErrorMessage)
+    {
+        var userId = this.CurrentUserId();
+        var charge = await _credits.TryConsumeAsync(userId, cost);
+        var error  = this.CreditErrorOrNull(charge);
+        if (error != null) return error;
 
         try
         {
-            var pdfBytes = await _reportService.GenerateComparisonReportAsync(idList);
-            var fileName = $"comparativa-{idList.Count}-propiedades-{DateTime.Now:yyyyMMdd}.pdf";
+            var pdfBytes = await generate();
             return File(pdfBytes, "application/pdf", fileName);
         }
         catch (InvalidOperationException ex)
         {
-            _logger.LogError(ex, "Comparison report generation failed");
+            _logger.LogError(ex, "Report generation failed");
+            await RefundIfChargedAsync(userId, charge);
             return StatusCode(500, new { message = ex.Message });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error generating comparison report");
-            return StatusCode(500, new { message = "Error inesperado al generar el informe comparativo." });
+            _logger.LogError(ex, "Unexpected error generating report");
+            await RefundIfChargedAsync(userId, charge);
+            return StatusCode(500, new { message = unexpectedErrorMessage });
         }
+    }
+
+    private async Task RefundIfChargedAsync(int userId, CreditCheckResult charge)
+    {
+        if (charge.Status != CreditCheckStatus.Charged) return;
+        try { await _credits.RefundAsync(userId, charge.Amount); }
+        catch (Exception ex) { _logger.LogError(ex, "No se pudieron reembolsar {Amount} créditos al usuario {UserId}", charge.Amount, userId); }
     }
 
     private static string BuildFileName(ReportFilters f)

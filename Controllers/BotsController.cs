@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Hangfire;
 using Inmobiscrap.Data;
+using Inmobiscrap.Infrastructure;
 using Inmobiscrap.Models;
 using Inmobiscrap.Jobs;
 using Microsoft.AspNetCore.Authorization;
@@ -74,10 +75,25 @@ public class BotsController : ControllerBase
         return Ok(bot);
     }
 
+    /// <summary>Valida URL y CRON antes de guardar (un CRON inválido hacía fallar Hangfire con 500).</summary>
+    private static string? ValidateBotRequest(string? url, bool scheduleEnabled, string? cron)
+    {
+        if (!SafeHttp.IsHttpUrl(url))
+            return "La URL del bot debe ser una URL http(s) válida.";
+
+        if (scheduleEnabled && !CronValidator.IsValid(cron, out var cronError))
+            return $"Expresión CRON inválida: {cronError}";
+
+        return null;
+    }
+
     // POST: api/bots
     [HttpPost]
     public async Task<ActionResult<Bot>> CreateBot(CreateBotRequest req)
     {
+        var validationError = ValidateBotRequest(req.Url, req.ScheduleEnabled, req.CronExpression);
+        if (validationError != null) return BadRequest(new { message = validationError });
+
         var userId = GetUserId();
 
         var bot = new Bot
@@ -85,10 +101,10 @@ public class BotsController : ControllerBase
             UserId          = userId,
             Name            = req.Name,
             Source          = req.Source,
-            Url             = req.Url,
+            Url             = req.Url.Trim(),
             IsActive        = req.IsActive,
             ScheduleEnabled = req.ScheduleEnabled,
-            CronExpression  = req.CronExpression,
+            CronExpression  = req.CronExpression?.Trim(),
             CreatedAt       = DateTime.UtcNow,
         };
 
@@ -103,6 +119,9 @@ public class BotsController : ControllerBase
     [HttpPut("{id}")]
     public async Task<IActionResult> UpdateBot(int id, UpdateBotRequest req)
     {
+        var validationError = ValidateBotRequest(req.Url, req.ScheduleEnabled, req.CronExpression);
+        if (validationError != null) return BadRequest(new { message = validationError });
+
         var userId = GetUserId();
         var existing = await _context.Bots
             .FirstOrDefaultAsync(b => b.Id == id && b.UserId == userId);
@@ -111,10 +130,10 @@ public class BotsController : ControllerBase
 
         existing.Name            = req.Name;
         existing.Source          = req.Source;
-        existing.Url             = req.Url;
+        existing.Url             = req.Url.Trim();
         existing.IsActive        = req.IsActive;
         existing.ScheduleEnabled = req.ScheduleEnabled;
-        existing.CronExpression  = req.CronExpression;
+        existing.CronExpression  = req.CronExpression?.Trim();
         existing.UpdatedAt       = DateTime.UtcNow;
 
         await _context.SaveChangesAsync();
@@ -203,16 +222,15 @@ public class BotsController : ControllerBase
     private void SyncHangfireJob(Bot bot)
     {
         var jobId = JobId(bot.Id);
-        if (bot.IsActive && bot.ScheduleEnabled && !string.IsNullOrWhiteSpace(bot.CronExpression))
+        var botId = bot.Id;
+        if (bot.IsActive && bot.ScheduleEnabled && CronValidator.IsValid(bot.CronExpression, out _))
         {
             _recurringJobs.AddOrUpdate<ScrapingJob>(
-                jobId, job => job.ExecuteBotAsync(bot.Id), bot.CronExpression);
+                jobId, job => job.ExecuteBotAsync(botId), bot.CronExpression!);
         }
         else
         {
             _recurringJobs.RemoveIfExists(jobId);
         }
     }
-
-    private async Task<bool> BotExists(int id) => await _context.Bots.AnyAsync(e => e.Id == id);
 }

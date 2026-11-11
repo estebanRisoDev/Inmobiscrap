@@ -43,7 +43,8 @@ public class SubscriptionExpiryJob
 
         foreach (var user in overdueUsers)
         {
-            var restored = user.CreditsBeforePro ?? 50;
+            var restored    = user.CreditsBeforePro ?? 50;
+            var lastBilling = user.NextBillingDate; // capturar antes de limpiarlo para el log
             user.Plan             = "base";
             user.Credits          = restored;
             user.CreditsBeforePro = null;
@@ -52,7 +53,7 @@ public class SubscriptionExpiryJob
 
             _logger.LogWarning(
                 "SubscriptionExpiry: usuario {UserId} ({Email}) degradado a base ({Credits} créditos). Última billing: {Date}",
-                user.Id, user.Email, restored, user.NextBillingDate);
+                user.Id, user.Email, restored, lastBilling);
         }
 
         await _context.SaveChangesAsync();

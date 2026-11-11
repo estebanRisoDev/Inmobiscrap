@@ -123,12 +123,12 @@ public class PropertyUpsertService : IPropertyUpsertService
         {
             var normalizedUrl = NormalizeUrl(scraped.SourceUrl);
 
-            var searchPrefix = normalizedUrl.Length > 30
-                ? normalizedUrl[..30]
-                : normalizedUrl;
-
+            // Antes se buscaba por los primeros 30 caracteres (ej. "https://www.portalinmobiliario"),
+            // lo que traía a memoria TODAS las propiedades del portal en cada upsert.
+            // La URL guardada, en minúsculas, empieza con la URL normalizada (sin query/fragment).
             var candidates = await _context.Properties
-                .Where(p => p.SourceUrl != null && p.SourceUrl.ToLower().Contains(searchPrefix))
+                .Where(p => p.SourceUrl != null && p.SourceUrl.ToLower().StartsWith(normalizedUrl))
+                .Take(20)
                 .ToListAsync();
 
             existing = candidates.FirstOrDefault(p =>
@@ -168,24 +168,44 @@ public class PropertyUpsertService : IPropertyUpsertService
 
                 // Traer un set acotado para comparar en memoria
                 // Usar un prefijo del título para filtrar en SQL
-                var titlePrefix = normTitle.Length > 10 ? scraped.Title!.Substring(0, 10) : scraped.Title!;
+                var rawTitle    = scraped.Title!.Trim();
+                var titlePrefix = rawTitle.Length > 10 ? rawTitle[..10] : rawTitle;
                 var candidates = await candidateQuery
                     .Where(p => p.Title != null && p.Title.ToLower().Contains(titlePrefix.ToLower()))
                     .Take(50)
                     .ToListAsync();
 
+                var scrapedUrl = string.IsNullOrWhiteSpace(scraped.SourceUrl) ? null : NormalizeUrl(scraped.SourceUrl);
+
                 existing = candidates.FirstOrDefault(p =>
                 {
+                    // Si ambas tienen URL y son distintas, son propiedades distintas aunque
+                    // el título sea parecido ("Departamento en venta en Providencia" es
+                    // genérico: fusionarlas generaba cambios de precio y alertas falsas).
+                    if (scrapedUrl != null && !string.IsNullOrWhiteSpace(p.SourceUrl)
+                        && NormalizeUrl(p.SourceUrl) != scrapedUrl)
+                        return false;
+
                     var pTitle = NormalizeText(p.Title);
                     var pCity  = NormalizeText(p.City);
                     var pType  = NormalizeText(p.PropertyType);
 
-                    // Título debe ser muy similar (igual normalizado o uno contiene al otro)
+                    // Título igual normalizado, o uno contiene al otro siendo de largo
+                    // similar (evita que "Casa" haga match con "Casa en Las Condes 4D").
+                    var shorter = Math.Min(pTitle.Length, normTitle.Length);
+                    var longer  = Math.Max(pTitle.Length, normTitle.Length);
                     var titleMatch = pTitle == normTitle
-                                  || pTitle.Contains(normTitle)
-                                  || normTitle.Contains(pTitle);
+                                  || (shorter >= 15 && shorter >= longer * 0.8
+                                      && (pTitle.Contains(normTitle) || normTitle.Contains(pTitle)));
 
                     if (!titleMatch) return false;
+
+                    // Si no hay ninguna URL para distinguirlas, exigir que coincidan
+                    // dormitorios y superficie cuando ambos lados los tienen.
+                    if (scraped.Bedrooms.HasValue && p.Bedrooms.HasValue && scraped.Bedrooms != p.Bedrooms)
+                        return false;
+                    if (scraped.Area.HasValue && p.Area.HasValue && Math.Abs(scraped.Area.Value - p.Area.Value) > 1)
+                        return false;
 
                     // Ciudad debe coincidir si ambas existen
                     if (!string.IsNullOrEmpty(normCity) && !string.IsNullOrEmpty(pCity)

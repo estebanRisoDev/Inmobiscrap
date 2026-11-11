@@ -13,6 +13,7 @@ using HtmlAgilityPack;
 using Amazon.BedrockRuntime;
 using Amazon.BedrockRuntime.Model;
 using Inmobiscrap.Data;
+using Inmobiscrap.Infrastructure;
 using Inmobiscrap.Models;
 
 namespace Inmobiscrap.Services;
@@ -281,6 +282,7 @@ public class ScraperService : IScraperService
             int newCount = 0;
             int updatedCount = 0;
             int unchangedCount = 0;
+            int failedCount = 0;
 
             for (int i = 0; i < scrapedProperties.Count; i++)
             {
@@ -322,7 +324,23 @@ public class ScraperService : IScraperService
                     }
                 }
 
-                var result = await _upsertService.UpsertPropertyAsync(property, bot.Id);
+                UpsertResult result;
+                try
+                {
+                    result = await _upsertService.UpsertPropertyAsync(property, bot.Id);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Una propiedad inválida no debe abortar el bot completo. Se limpia el
+                    // ChangeTracker porque la entidad fallida queda "Added" y haría fallar
+                    // todos los SaveChanges siguientes.
+                    failedCount++;
+                    _context.ChangeTracker.Clear();
+                    _context.Attach(bot);
+                    await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                        $"⚠️ No se pudo guardar '{property.Title}': {(ex.InnerException ?? ex).Message}");
+                    continue;
+                }
 
                 switch (result)
                 {
@@ -348,7 +366,8 @@ public class ScraperService : IScraperService
 
             await _botLogService.LogSuccessAsync(bot.Id, bot.Name,
                 $"💾 Resultado: {newCount} nuevas | {updatedCount} actualizadas | {unchangedCount} sin cambios " +
-                $"({newCount + updatedCount + unchangedCount} snapshots creados)");
+                $"({newCount + updatedCount + unchangedCount} snapshots creados)" +
+                (failedCount > 0 ? $" | {failedCount} con error" : ""));
 
             // ══════════════════════════════════════════════════════════════
             // FASE 9: Actualizar estado final del bot
@@ -375,13 +394,29 @@ public class ScraperService : IScraperService
         {
             await _botLogService.LogErrorAsync(bot.Id, bot.Name,
                 $"❌ Bot execution failed: {ex.Message}", ex);
-
-            bot.Status    = "error";
-            bot.LastError = ex.Message;
-            bot.UpdatedAt = DateTime.UtcNow;
-            await _context.SaveChangesAsync();
-
             _logger.LogError(ex, "Error in bot {BotId}", bot.Id);
+
+            // Si el error vino de un SaveChanges, las entidades inválidas siguen en el
+            // ChangeTracker y un SaveChanges aquí volvería a fallar, dejando el bot
+            // pegado en "running". Limpiar y actualizar solo el estado del bot.
+            try
+            {
+                _context.ChangeTracker.Clear();
+                var message = ex.Message.Length > 1000 ? ex.Message[..1000] : ex.Message;
+                await _context.Bots
+                    .Where(b => b.Id == bot.Id)
+                    .ExecuteUpdateAsync(s => s
+                        .SetProperty(b => b.Status, "error")
+                        .SetProperty(b => b.LastError, message)
+                        .SetProperty(b => b.UpdatedAt, DateTime.UtcNow));
+                bot.Status    = "error";
+                bot.LastError = message;
+            }
+            catch (Exception saveEx)
+            {
+                _logger.LogError(saveEx, "No se pudo marcar el bot {BotId} como error", bot.Id);
+            }
+
             throw;
         }
 
@@ -788,7 +823,8 @@ public class ScraperService : IScraperService
             JavaScriptEnabled = true
         });
 
-        var capturedJsonResponses = new List<string>();
+        // El evento Response se dispara en paralelo: colección thread-safe
+        var capturedJsonResponses = new System.Collections.Concurrent.ConcurrentQueue<string>();
         var page = await context.NewPageAsync();
 
         // Capturar TODAS las respuestas de API (JSON, texto con datos, etc.)
@@ -799,11 +835,6 @@ public class ScraperService : IScraperService
                 var responseUrl = response.Url;
                 var contentType = response.Headers.GetValueOrDefault("content-type", "");
                 var status      = response.Status;
-
-                // DEBUG TEMPORAL: loguear TODAS las respuestas para identificar la API de listings
-                var ctShort = contentType.Length > 30 ? contentType[..30] : contentType;
-                var urlShort = responseUrl.Length > 150 ? responseUrl[..150] : responseUrl;
-                Console.WriteLine($"[PW-DEBUG] {status} | {ctShort} | {urlShort}");
 
                 // Filtrar assets estáticos
                 bool isStaticAsset =
@@ -833,17 +864,9 @@ public class ScraperService : IScraperService
                 if (!isStaticAsset && !isTracker && isDataResponse && status >= 200 && status < 300)
                 {
                     var body = await response.TextAsync();
-                    Console.WriteLine($"[PW-CAPTURE] Candidate: {urlShort} | bodyLen={body.Length} | startsJSON={body.TrimStart().StartsWith("{") || body.TrimStart().StartsWith("[")}");
                     // Umbral bajo: capturar cualquier respuesta con datos
                     if (body.Length > 100 && (body.TrimStart().StartsWith("{") || body.TrimStart().StartsWith("[")))
-                    {
-                        capturedJsonResponses.Add(body);
-                        Console.WriteLine($"[PW-CAPTURED] ✅ {urlShort} | {body.Length} chars");
-                    }
-                }
-                else if (!isStaticAsset && status >= 200 && status < 300)
-                {
-                    Console.WriteLine($"[PW-SKIPPED] reason={( isTracker ? "tracker" : "not-data-content-type" )} | {urlShort}");
+                        capturedJsonResponses.Enqueue(body);
                 }
             }
             catch (Exception ex)
@@ -1024,18 +1047,10 @@ public class ScraperService : IScraperService
                     return text.split('\n').map(l => l.trim()).filter(l => l.length > 1).join('\n').trim();
                 })()
             ") ?? "";
-            Console.WriteLine($"[PW-DOM] innerText length: {domInnerText.Length}");
-
-            // Log de preview para debug
-            if (domInnerText.Length > 0)
-            {
-                var preview = domInnerText.Length > 500 ? domInnerText[..500] : domInnerText;
-                Console.WriteLine($"[PW-DOM] Preview: {preview}");
-            }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PW-DOM] Error reading innerText: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[PW-DOM] Error reading innerText: {ex.Message}");
         }
 
         var renderedHtml = await page.ContentAsync();
@@ -1045,33 +1060,26 @@ public class ScraperService : IScraperService
         try
         {
             var capturedCount = await page.EvaluateAsync<int>("window.__capturedResponses?.length ?? 0");
-            Console.WriteLine($"[PW-JS-INTERCEPTOR] Captured {capturedCount} responses via JS hooks");
 
             for (int i = 0; i < capturedCount; i++)
             {
                 try
                 {
                     var entry = await page.EvaluateAsync<JsonElement>($"window.__capturedResponses[{i}]");
-                    var entryUrl  = entry.GetProperty("url").GetString() ?? "";
                     var entryBody = entry.GetProperty("body").GetString() ?? "";
-                    var entryCt   = entry.GetProperty("ct").GetString() ?? "";
-
-                    Console.WriteLine($"[PW-JS-CAPTURED] {entryUrl} | ct={entryCt.Substring(0, Math.Min(30, entryCt.Length))} | bodyLen={entryBody.Length}");
 
                     if (entryBody.Length > 100)
-                    {
                         jsCapturedData.Add(entryBody);
-                    }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[PW-JS-ERROR] Reading entry {i}: {ex.Message}");
+                    System.Diagnostics.Debug.WriteLine($"[PW-JS-ERROR] Reading entry {i}: {ex.Message}");
                 }
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PW-JS-ERROR] Reading __capturedResponses: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[PW-JS-ERROR] Reading __capturedResponses: {ex.Message}");
         }
 
         // Combinar datos: Playwright response handler + JS interceptor
@@ -1169,7 +1177,7 @@ public class ScraperService : IScraperService
             return BuildMockProperties(bot);
         }
 
-        var modelId = Environment.GetEnvironmentVariable("BEDROCK_MODEL_ID")
+        var modelId = EnvConfig.Get("BEDROCK_MODEL_ID")
             ?? "us.anthropic.claude-3-5-sonnet-20241022-v2:0";
 
         var chunks = ChunkText(compactText, maxChunkSize: 10_000).ToList();
@@ -1430,25 +1438,14 @@ TEXTO:
                     PropertyNameCaseInsensitive = true
                 });
 
-                return result?.Properties?.Select(p => new Property
-                {
-                    Title        = p.Title ?? string.Empty,
-                    SourceUrl    = p.SourceUrl,
-                    Price        = p.Price,
-                    Currency     = p.Currency ?? "CLP",
-                    Address      = p.Address,
-                    City         = p.City,
-                    Region       = p.Region,
-                    Neighborhood = p.Neighborhood,
-                    Bedrooms     = p.Bedrooms,
-                    Bathrooms    = p.Bathrooms,
-                    Area         = p.Area,
-                    PropertyType    = p.PropertyType,
-                    Description     = p.Description,
-                    PublicationDate = p.PublicationDate,
-                    Condition       = p.Condition,
-                    IsArriendo      = p.IsArriendo
-                }).ToList() ?? new List<Property>();
+                if (stopReason == "max_tokens")
+                    await _botLogService.LogWarningAsync(bot.Id, bot.Name,
+                        "⚠️ Bedrock cortó la respuesta por max_tokens: el JSON puede venir incompleto.");
+
+                return result?.Properties?
+                    .Where(p => !string.IsNullOrWhiteSpace(p.Title))
+                    .Select(ToSanitizedProperty)
+                    .ToList() ?? new List<Property>();
             }
             catch (JsonException ex)
             {
@@ -1474,11 +1471,80 @@ TEXTO:
         return new List<Property>();
     }
 
-    private static bool IsMockScrapingEnabled() =>
-        string.Equals(
-            Environment.GetEnvironmentVariable("SCRAPER_MOCK_MODE"),
-            "true",
-            StringComparison.OrdinalIgnoreCase);
+    private static bool IsMockScrapingEnabled() => EnvConfig.GetBool("SCRAPER_MOCK_MODE");
+
+    // ══════════════════════════════════════════════════════════════════════
+    // SANEAMIENTO DE LA SALIDA DEL LLM
+    // Los largos coinciden con ApplicationDbContext: un valor más largo hacía
+    // fallar el INSERT y abortaba el bot completo.
+    // ══════════════════════════════════════════════════════════════════════
+
+    private const decimal MaxPrice = 9_999_999_999_999_999m; // numeric(18,2)
+    private const decimal MaxArea  = 99_999_999m;            // numeric(10,2)
+
+    private static Property ToSanitizedProperty(PropertyDto p) => new()
+    {
+        Title           = Truncate(p.Title?.Trim(), 500) ?? string.Empty,
+        SourceUrl       = SanitizeUrl(p.SourceUrl),
+        Price           = p.Price is > 0 and < MaxPrice ? p.Price : null,
+        Currency        = NormalizeCurrency(p.Currency),
+        Address         = Truncate(p.Address?.Trim(), 500),
+        City            = Truncate(p.City?.Trim(), 100),
+        Region          = Truncate(p.Region?.Trim(), 100),
+        Neighborhood    = Truncate(p.Neighborhood?.Trim(), 200),
+        Bedrooms        = p.Bedrooms is >= 0 and < 1000 ? p.Bedrooms : null,
+        Bathrooms       = p.Bathrooms is >= 0 and < 1000 ? p.Bathrooms : null,
+        Area            = p.Area is > 0 and < MaxArea ? Math.Round(p.Area.Value, 2) : null,
+        PropertyType    = Truncate(p.PropertyType?.Trim(), 50),
+        Description     = p.Description?.Trim(),
+        PublicationDate = SanitizePublicationDate(p.PublicationDate),
+        Condition       = NormalizeCondition(p.Condition),
+        IsArriendo      = p.IsArriendo,
+    };
+
+    private static string? Truncate(string? value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        return value.Length <= maxLength ? value : value[..maxLength];
+    }
+
+    private static string? SanitizeUrl(string? url)
+    {
+        var trimmed = url?.Trim();
+        return trimmed != null && trimmed.Length <= 2000 && SafeHttp.IsHttpUrl(trimmed) ? trimmed : null;
+    }
+
+    private static string NormalizeCurrency(string? currency)
+    {
+        var c = currency?.Trim().ToUpperInvariant() ?? "";
+        return c switch
+        {
+            "UF" or "U.F." or "CLF"           => "UF",
+            "USD" or "US$" or "U$S" or "DOLAR" => "USD",
+            _                                  => "CLP",
+        };
+    }
+
+    private static string? NormalizeCondition(string? condition)
+    {
+        var c = condition?.Trim().ToLowerInvariant();
+        if (string.IsNullOrEmpty(c)) return null;
+        if (c.StartsWith("nuev") || c.Contains("estrenar")) return "Nuevo";
+        if (c.StartsWith("usad") || c.Contains("segunda"))  return "Usado";
+        return null;
+    }
+
+    /// <summary>
+    /// Bedrock devuelve "YYYY-MM-DD" → DateTime Kind=Unspecified, que Npgsql
+    /// rechaza en columnas timestamptz. Además descarta fechas absurdas.
+    /// </summary>
+    private static DateTime? SanitizePublicationDate(DateTime? date)
+    {
+        if (!date.HasValue) return null;
+        var utc = date.Value.ToUtc();
+        if (utc.Year < 2000 || utc > DateTime.UtcNow.AddDays(1)) return null;
+        return utc;
+    }
 
     private static List<Property> BuildMockProperties(Bot bot) =>
         new List<Property>
